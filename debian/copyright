@@ -1,0 +1,81 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: keylime
+Source: https://github.com/keylime/keylime
+
+Files: *
+Copyright: 2017 Massachusetts Institute of Technology.
+License: Apache-2.0
+
+Files: archive/*
+       demo/*
+Copyright: 2015 Massachusetts Institute of Technology.
+License: Apache-2.0
+
+Files: keylime/cmd/migrations_apply.py
+Copyright: 2020 Michael Peters (mpeters@redhat.com), Red Hat, Inc.
+License: Apache-2.0
+
+Files: keylime/common/*
+Copyright: 2020 Kaifeng Wang
+License: Apache-2.0
+
+Files: keylime/db/*
+       test/test_registrar_db.py
+       test/test_verifier_db.py
+Copyright: 2020 Luke Hinds (lhinds@redhat.com), Red Hat, Inc.
+License: Apache-2.0
+
+Files: keylime/measured_boot.py
+Copyright: 2021 IBM Corp.
+License: Apache-2.0
+
+Files: keylime/tpm/tpm2_objects.py
+Copyright: 2021 Red Hat, Inc.
+License: Apache-2.0
+
+Files: keylime/static/icons/*
+Copyright: 2014 Waybury
+License: Expat
+
+Files: test/test_ima_verification.py
+Copyright: 2020 IBM Corporation
+License: Apache-2.0
+
+Files: debian/*
+Copyright: Utkarsh Gupta <utkarsh.gupta@canonical.com>
+License: Apache-2.0
+
+License: Apache-2.0
+ Licensed under the Apache License, Version 2.0 (the "License");
+ you may not use this file except in compliance with the License.
+ You may obtain a copy of the License at
+ .
+    http://www.apache.org/licenses/LICENSE-2.0
+ .
+ Unless required by applicable law or agreed to in writing, software
+ distributed under the License is distributed on an "AS IS" BASIS,
+ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ See the License for the specific language governing permissions and
+ limitations under the License.
+ .
+ On Debian-based systems the full text of the Apache version 2.0 license
+ can be found in /usr/share/common-licenses/Apache-2.0.
+
+License: Expat
+ Permission is hereby granted, free of charge, to any person obtaining a copy
+ of this software and associated documentation files (the "Software"), to deal
+ in the Software without restriction, including without limitation the rights
+ to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ copies of the Software, and to permit persons to whom the Software is
+ furnished to do so, subject to the following conditions:
+ .
+ The above copyright notice and this permission notice shall be included in
+ all copies or substantial portions of the Software.
+ .
+ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+ THE SOFTWARE.
