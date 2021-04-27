@@ -1,4 +1,2 @@
-# please also check http://pypi.debian.net/keylime/watch
-version=3
-opts=uversionmangle=s/(rc|a|b|c)/~$1/ \
-http://pypi.debian.net/keylime/keylime-(.+)\.(?:zip|tgz|tbz|txz|(?:tar\.(?:gz|bz2|xz)))
+version=4
+https://github.com/keylime/keylime/releases .*/([\d\.]+).tar.gz
