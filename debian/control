@@ -4,8 +4,22 @@ Section: python
 Priority: optional
 Build-Depends: debhelper-compat (= 11),
                dh-python,
+               libtss2-dev,
+               python3-alembic,
                python3-all,
-               python3-setuptools
+               python3-cryptography,
+               python3-dbus,
+               python3-gnupg,
+               python3-m2crypto,
+               python3-requests,
+               python3-setuptools,
+               python3-simplejson,
+               python3-sqlalchemy,
+               python3-tornado,
+               python3-yaml,
+               python3-zmq,
+               tpm2-abrmd,
+               tpm2-tools
 Standards-Version: 4.5.0
 Homepage: https://keylime.dev
 
