@@ -1,0 +1,24 @@
+Source: keylime
+Maintainer: Utkarsh Gupta <utkarsh.gupta@canonical.com>
+Section: python
+Priority: optional
+Build-Depends: debhelper (>= 11),
+               dh-python,
+               python3-all,
+               python3-setuptools
+Standards-Version: 4.5.0
+Homepage: https://keylime.dev
+
+Package: python3-keylime
+Architecture: all
+Depends: ${misc:Depends},
+         ${python3:Depends}
+Description: TPM-based key bootstrapping and system integrity measurement
+ Keylime is an open source scalable trust system harnessing TPM Technology.
+ .
+ Keylime provides an end-to-end solution for bootstrapping hardware rooted
+ cryptographic trust for remote machines, the provisioning of encrypted
+ payloads and run-time system integrity monitoring. It also provides a
+ flexible framework for the remote attestation of any given `PCR` (Platform
+ Configuration Register). Users can create their own customized actions that
+ will trigger when a machine fails its attested measurements.
