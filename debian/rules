@@ -7,3 +7,7 @@ export KEYLIME_CONFIG=$(CURDIR)/keylime.conf
 %:
 	dh $@ --with python3 --buildsystem=pybuild
 
+override_dh_installsystemd:
+	dh_installsystemd -p python3-keylime --name keylime_agent
+	dh_installsystemd -p python3-keylime --name keylime_registrar
+	dh_installsystemd -p python3-keylime --name keylime_verifier
