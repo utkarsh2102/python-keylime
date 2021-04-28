@@ -1,0 +1,15 @@
+[Unit]
+Description=The Keylime registrar service
+After=network.target
+StartLimitInterval=10s
+StartLimitBurst=5
+
+[Service]
+Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0
+ExecStart=/usr/bin/keylime_registrar
+TimeoutSec=60s
+Restart=on-failure
+RestartSec=120s
+
+[Install]
+WantedBy=multi-user.target
