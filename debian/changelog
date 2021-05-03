@@ -1,4 +1,4 @@
-keylime (6.1.0-1) hirsute; urgency=medium
+keylime (6.1.0-1~ibmcloud0.1) bionic; urgency=medium
 
   * Initial release.
 
