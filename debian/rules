@@ -11,3 +11,4 @@ override_dh_installsystemd:
 	dh_installsystemd -p python3-keylime --name keylime_agent
 	dh_installsystemd -p python3-keylime --name keylime_registrar
 	dh_installsystemd -p python3-keylime --name keylime_verifier
+	dh_installsystemd -p python3-keylime --name var-lib-keylime-secure

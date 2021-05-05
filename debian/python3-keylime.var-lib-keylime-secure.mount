@@ -1,0 +1,11 @@
+[Unit]
+Description=Keylime configuration filesystem
+
+[Mount]
+What=tmpfs
+Where=/var/lib/keylime/secure
+Type=tmpfs
+Options=mode=0700,size=1m
+
+[Install]
+WantedBy=multi-user.target
