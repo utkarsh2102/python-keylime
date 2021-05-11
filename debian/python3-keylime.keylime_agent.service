@@ -8,7 +8,11 @@ ConditionPathExistsGlob=/dev/tpm[0-9]*
 ConditionPathExistsGlob=/dev/tpmrm[0-9]*
 
 [Service]
-User=keylime
+# We want to run keylime_agent as non-root but this can't
+# happen because of restricitons on keylime_agent.py:main(),
+# which needs to be run as root. Please see the issue below:
+# https://github.com/keylime/keylime/issues/666
+#User=keylime
 Group=tss
 Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0
 ExecStart=/usr/bin/keylime_agent

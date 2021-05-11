@@ -17,17 +17,23 @@ case "$1" in
                 tss
     fi
 
-    # creating keylime user if he isn't already there
-    if ! getent passwd keylime >/dev/null; then
-        adduser --system --ingroup tss --shell /bin/false \
-                --home /var/lib/keylime --no-create-home \
-                --gecos "Keylime remote attestation" \
-                keylime
-    fi
+#    We want to run keylime_agent as non-root but this can't
+#    happen because of restricitons on keylime_agent.py:main(),
+#    which needs to be run as root. Please see the issue below:
+#    https://github.com/keylime/keylime/issues/666
+#
+#    # creating keylime user if he isn't already there
+#    if ! getent passwd keylime >/dev/null; then
+#        adduser --system --ingroup tss --shell /bin/false \
+#                --home /var/lib/keylime --no-create-home \
+#                --gecos "Keylime remote attestation" \
+#                keylime
+#    fi
 
     # Setting owner
     if [ -d /var/lib/keylime ] && getent passwd keylime >/dev/null; then
-        chown -R keylime:tss /var/lib/keylime
+#       chown -R keylime:tss /var/lib/keylime
+        chown -R root:tss /var/lib/keylime
     fi
 
     ;;
