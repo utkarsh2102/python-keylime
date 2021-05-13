@@ -1,3 +1,9 @@
+keylime (6.1.0-1~ibmcloud0.2) bionic; urgency=medium
+
+  * Add needed Python modules to 'Depends'.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Thu, 13 May 2021 23:38:43 +0530
+
 keylime (6.1.0-1~ibmcloud0.1) bionic; urgency=medium
 
   * Initial release.
