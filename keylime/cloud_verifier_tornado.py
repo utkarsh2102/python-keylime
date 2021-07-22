@@ -11,26 +11,27 @@ import asyncio
 
 import simplejson as json
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm.exc import NoResultFound
 import tornado.ioloop
 import tornado.web
 
 from keylime import config
 from keylime.common import states
 from keylime.db.verifier_db import VerfierMain
+from keylime.db.verifier_db import VerifierAllowlist
 from keylime.db.keylime_db import DBEngineManager, SessionManager
 from keylime import keylime_logging
 from keylime import cloud_verifier_common
 from keylime import revocation_notifier
-import keylime.tornado_requests as tornado_requests
-
+from keylime import tornado_requests
 
 logger = keylime_logging.init_logging('cloudverifier')
 
 
 try:
     engine = DBEngineManager().make_engine('cloud_verifier')
-except SQLAlchemyError as e:
-    logger.error('Error creating SQL engine or session: %s', e)
+except SQLAlchemyError as err:
+    logger.error('Error creating SQL engine or session: %s', err)
     sys.exit(1)
 
 
@@ -41,7 +42,7 @@ def get_session():
 # The "exclude_db" dict values are removed from the response before adding the dict to the DB
 # This is because we want these values to remain ephemeral and not stored in the database.
 exclude_db = {
-    'registrar_keys': '',
+    'registrar_data': '',
     'nonce': '',
     'b64_encrypted_V': '',
     'provide_V': True,
@@ -160,7 +161,7 @@ class AgentsHandler(BaseHandler):
 
         agent_id = rest_params["agents"]
 
-        if agent_id is not None:
+        if (agent_id is not None) and (agent_id != ''):
             try:
                 agent = session.query(VerfierMain).filter_by(
                     agent_id=agent_id).one_or_none()
@@ -173,9 +174,30 @@ class AgentsHandler(BaseHandler):
             else:
                 config.echo_json_response(self, 404, "agent id not found")
         else:
-            json_response = session.query(VerfierMain.agent_id).all()
-            config.echo_json_response(self, 200, "Success", {
-                'uuids': json_response})
+            json_response = None
+            if "bulk" in rest_params.keys():
+                agent_list = None
+
+                if ("verifier" in rest_params.keys()) and (rest_params["verifier"] != ''):
+                    agent_list = session.query(VerfierMain).filter_by(verifier_id=rest_params["verifier"]).all()
+                else:
+                    agent_list = session.query(VerfierMain).all()
+
+                json_response = {}
+                for agent in agent_list:
+                    json_response[agent.agent_id] = cloud_verifier_common.process_get_status(agent)
+
+                config.echo_json_response(self, 200, "Success", json_response)
+            else:
+                if ("verifier" in rest_params.keys()) and (rest_params["verifier"] != ''):
+                    json_response = session.query(VerfierMain.agent_id).filter_by(
+                        verifier_id=rest_params["verifier"]).all()
+                else:
+                    json_response = session.query(VerfierMain.agent_id).all()
+
+                config.echo_json_response(self, 200, "Success", {
+                    'uuids': json_response})
+
             logger.info('GET returning 200 response for agent_id list')
 
     def delete(self):
@@ -211,6 +233,12 @@ class AgentsHandler(BaseHandler):
         if agent is None:
             config.echo_json_response(self, 404, "agent id not found")
             logger.info('DELETE returning 404 response. agent id: %s not found.', agent_id)
+            return
+
+        verifier_id = config.get('cloud_verifier', 'cloudverifier_id', cloud_verifier_common.DEFAULT_VERIFIER_ID)
+        if verifier_id != agent.verifier_id:
+            config.echo_json_response(self, 404, "agent id associated to this verifier")
+            logger.info('DELETE returning 404 response. agent id: %s not associated to this verifer.', agent_id)
             return
 
         op_state = agent.operational_state
@@ -287,6 +315,9 @@ class AgentsHandler(BaseHandler):
                     agent_data['enc_alg'] = ""
                     agent_data['sign_alg'] = ""
                     agent_data['agent_id'] = agent_id
+                    agent_data['verifier_id'] = config.get('cloud_verifier', 'cloudverifier_id', cloud_verifier_common.DEFAULT_VERIFIER_ID)
+                    agent_data['verifier_ip'] = config.get('cloud_verifier', 'cloudverifier_ip')
+                    agent_data['verifier_port'] = config.get('cloud_verifier', 'cloudverifier_port')
 
                     is_valid, err_msg = cloud_verifier_common.validate_agent_data(agent_data)
                     if not is_valid:
@@ -355,8 +386,9 @@ class AgentsHandler(BaseHandler):
                 config.echo_json_response(self, 400, "uri not supported")
                 logger.warning("PUT returning 400 response. uri not supported")
             try:
+                verifier_id = config.get('cloud_verifier', 'cloudverifier_id', cloud_verifier_common.DEFAULT_VERIFIER_ID)
                 agent = session.query(VerfierMain).filter_by(
-                    agent_id=agent_id).one()
+                    agent_id=agent_id, verifier_id=verifier_id).one()
             except SQLAlchemyError as e:
                 logger.error('SQLAlchemy Error: %s', e)
 
@@ -392,6 +424,165 @@ class AgentsHandler(BaseHandler):
             logger.warning("PUT returning 400 response. Exception error: %s", e)
             logger.exception(e)
         self.finish()
+
+    def data_received(self, chunk):
+        raise NotImplementedError()
+
+
+class AllowlistHandler(BaseHandler):
+    def head(self):
+        config.echo_json_response(
+            self, 400, "Allowlist handler: HEAD Not Implemented")
+
+    def get(self):
+        """Get an allowlist
+
+        GET /(?:v[0-9]/)?allowlists/{name}
+        """
+
+        rest_params = config.get_restful_params(self.request.uri)
+        if rest_params is None or 'allowlists' not in rest_params:
+            config.echo_json_response(self, 400, "Invalid URL")
+            return
+
+        allowlist_name = rest_params['allowlists']
+        if allowlist_name is None:
+            config.echo_json_response(self, 400, "Invalid URL")
+            logger.warning(
+                'GET returning 400 response: ' + self.request.path)
+            return
+
+        session = get_session()
+        try:
+            allowlist = session.query(VerifierAllowlist).filter_by(
+                name=allowlist_name).one()
+        except NoResultFound:
+            config.echo_json_response(self, 404, "Allowlist %s not found" % allowlist_name)
+            return
+        except SQLAlchemyError as e:
+            logger.error(f'SQLAlchemy Error: {e}')
+            config.echo_json_response(self, 500, "Failed to get allowlist")
+            raise
+
+        response = {}
+        for field in ('name', 'tpm_policy', 'vtpm_policy', 'ima_policy'):
+            response[field] = getattr(allowlist, field, None)
+        config.echo_json_response(self, 200, 'Success', response)
+
+    def delete(self):
+        """Delete an allowlist
+
+        DELETE /(?:v[0-9]/)?allowlists/{name}
+        """
+
+        rest_params = config.get_restful_params(self.request.uri)
+        if rest_params is None or 'allowlists' not in rest_params:
+            config.echo_json_response(self, 400, "Invalid URL")
+            return
+
+        allowlist_name = rest_params['allowlists']
+        if allowlist_name is None:
+            config.echo_json_response(self, 400, "Invalid URL")
+            logger.warning(
+                'DELETE returning 400 response: ' + self.request.path)
+            return
+
+        session = get_session()
+        try:
+            session.query(VerifierAllowlist).filter_by(
+                name=allowlist_name).one()
+        except NoResultFound:
+            config.echo_json_response(self, 404, "Allowlist %s not found" % allowlist_name)
+            return
+        except SQLAlchemyError as e:
+            logger.error(f'SQLAlchemy Error: {e}')
+            config.echo_json_response(self, 500, "Failed to get allowlist")
+            raise
+
+        try:
+            session.query(VerifierAllowlist).filter_by(
+                name=allowlist_name).delete()
+            session.commit()
+        except SQLAlchemyError as e:
+            logger.error(f'SQLAlchemy Error: {e}')
+            config.echo_json_response(self, 500, "Failed to get allowlist")
+            raise
+
+        # NOTE(kaifeng) 204 Can not have response body, but current helper
+        # doesn't support this case.
+        self.set_status(204)
+        self.set_header('Content-Type', 'application/json')
+        self.finish()
+        logger.info(
+            'DELETE returning 204 response for allowlist: ' + allowlist_name)
+
+    def post(self):
+        """Create an allowlist
+
+        POST /(?:v[0-9]/)?allowlists/{name}
+        body: {"tpm_policy": {..}, "vtpm_policy": {..}
+        """
+
+        rest_params = config.get_restful_params(self.request.uri)
+        if rest_params is None or 'allowlists' not in rest_params:
+            config.echo_json_response(self, 400, "Invalid URL")
+            return
+
+        allowlist_name = rest_params['allowlists']
+        if allowlist_name is None:
+            config.echo_json_response(self, 400, "Invalid URL")
+            return
+
+        content_length = len(self.request.body)
+        if content_length == 0:
+            config.echo_json_response(
+                self, 400, "Expected non zero content length")
+            logger.warning(
+                'POST returning 400 response. Expected non zero content length.')
+            return
+
+        allowlist = {}
+        json_body = json.loads(self.request.body)
+        allowlist['name'] = allowlist_name
+        tpm_policy = json_body.get('tpm_policy')
+        if tpm_policy:
+            allowlist['tpm_policy'] = tpm_policy
+        vtpm_policy = json_body.get('vtpm_policy')
+        if vtpm_policy:
+            allowlist['vtpm_policy'] = vtpm_policy
+        ima_policy = json_body.get('ima_policy')
+        if ima_policy:
+            allowlist['ima_policy'] = ima_policy
+
+        session = get_session()
+        # don't allow overwritting
+        try:
+            al_count = session.query(
+                VerifierAllowlist).filter_by(name=allowlist_name).count()
+            if al_count > 0:
+                config.echo_json_response(
+                    self, 409, "Allowlist with name %s already exists" % allowlist_name)
+                logger.warning(
+                    "Allowlist with name %s already exists" % allowlist_name)
+                return
+        except SQLAlchemyError as e:
+            logger.error(f'SQLAlchemy Error: {e}')
+            raise
+
+        try:
+            # Add the agent and data
+            session.add(VerifierAllowlist(**allowlist))
+            session.commit()
+        except SQLAlchemyError as e:
+            logger.error(f'SQLAlchemy Error: {e}')
+            raise
+
+        config.echo_json_response(self, 201)
+        logger.info('POST returning 201')
+
+    def put(self):
+        config.echo_json_response(
+            self, 400, "Allowlist handler: PUT Not Implemented")
 
     def data_received(self, chunk):
         raise NotImplementedError()
@@ -603,15 +794,26 @@ async def process_agent(agent, new_operational_state):
         logger.exception(e)
 
 
-async def activate_agents():
+async def activate_agents(verifier_id, verifier_ip, verifier_port):
     session = get_session()
     try:
-        agents = session.query(VerfierMain).all()
+        agents = session.query(VerfierMain).filter_by(
+            verifier_id=verifier_id).all()
         for agent in agents:
+            agent.verifier_ip = verifier_ip
+            agent.verifier_host = verifier_port
             if agent.operational_state == states.START:
                 asyncio.ensure_future(process_agent(agent, states.GET_QUOTE))
+        session.commit()
     except SQLAlchemyError as e:
         logger.error('SQLAlchemy Error: %s', e)
+
+
+def start_tornado(tornado_server, port):
+    tornado_server.listen(port)
+    print("Starting Torando on port " + str(port))
+    tornado.ioloop.IOLoop.instance().start()
+    print("Tornado finished")
 
 
 def main():
@@ -620,6 +822,7 @@ def main():
 
     cloudverifier_port = config.get('cloud_verifier', 'cloudverifier_port')
     cloudverifier_host = config.get('cloud_verifier', 'cloudverifier_ip')
+    cloudverifier_id = config.get('cloud_verifier', 'cloudverifier_id', cloud_verifier_common.DEFAULT_VERIFIER_ID)
 
     # allow tornado's max upload size to be configurable
     max_upload_size = None
@@ -646,6 +849,7 @@ def main():
 
     app = tornado.web.Application([
         (r"/(?:v[0-9]/)?agents/.*", AgentsHandler),
+        (r"/(?:v[0-9]/)?allowlists/.*", AllowlistHandler),
         (r".*", MainHandler),
     ])
 
@@ -663,7 +867,7 @@ def main():
     asyncio.set_event_loop(asyncio.new_event_loop())
     # Auto reactivate agent
     if task_id == 0:
-        asyncio.ensure_future(activate_agents())
+        asyncio.ensure_future(activate_agents(cloudverifier_id, cloudverifier_host, cloudverifier_port))
 
     server = tornado.httpserver.HTTPServer(app, ssl_options=context, max_buffer_size=max_upload_size)
     server.add_sockets(sockets)

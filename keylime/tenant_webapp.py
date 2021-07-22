@@ -110,6 +110,14 @@ class WebAppHandler(BaseHandler):
         vtpm_policy = json.dumps(json.loads(
             config.get('tenant', 'vtpm_policy')), indent=2)
 
+        # Get default intervals for populating angents, updating agents and updating terminal
+        populate_agents_interval = json.dumps(json.loads(
+            config.get('webapp', 'populate_agents_interval')), indent=2)
+        update_agents_interval = json.dumps(json.loads(
+            config.get('webapp', 'update_agents_interval')), indent=2)
+        update_terminal_interval = json.dumps(json.loads(
+            config.get('webapp', 'update_terminal_interval')), indent=2)
+
         self.set_status(200)
         self.set_header('Content-Type', 'text/html')
         self.write(
@@ -120,12 +128,25 @@ class WebAppHandler(BaseHandler):
                     <meta charset='UTF-8'>
                     <title>Advanced Tenant Management System</title>
                     <script type='text/javascript' src='/static/js/webapp.js'></script>
+                    <script type='text/javascript'>
+                        window.onload = function(e) {{
+                            let droppable = document.getElementsByClassName("file_drop");
+                            for (let i = 0; i < droppable.length; i++) {{
+                                droppable[i].addEventListener('dragover', dragoverCallback, false);
+                                droppable[i].addEventListener('drop', fileUploadCallback, false);
+                            }}
+                            populateAgents();
+                            setInterval(populateAgents, {0});
+                            setInterval(updateAgentsInfo, {1});
+                            setInterval(updateTerminal, {2});
+                        }}
+                    </script>
                     <link href='/static/css/webapp.css' rel='stylesheet' type='text/css'/>
                 </head>
                 <body>
-                    <div id='modal_box' onclick="if (event.target == this) {toggleVisibility(this.id);resetAddAgentForm();return false;}">
+                    <div id='modal_box' onclick="if (event.target == this) {{toggleVisibility(this.id);resetAddAgentForm();return false;}}">
 
-            """
+            """.format(populate_agents_interval, update_agents_interval, update_terminal_interval)
         )
 
         self.write(
@@ -408,32 +429,8 @@ class AgentsHandler(BaseHandler):
 
         agent_list = response_body["results"]["uuids"]
 
-        # Loop through each agent and ask for status
-        agents = {}
-        for agent in agent_list:
-            agents[agent] = await self.get_agent_state(agent_id)
-
-        # Pre-create sorted agents list
-        sorted_by_state = {}
-        for state in states.VALID_STATES:
-            sorted_by_state[state] = {}
-
-        # Build sorted agents list
-        for agent_id in agents:
-            state = agents[agent_id]["operational_state"]
-            sorted_by_state[state][agent_id] = agents[agent_id]
-
-        print_order = [states.TENANT_FAILED, states.INVALID_QUOTE,
-                       states.FAILED, states.GET_QUOTE, states.GET_QUOTE_RETRY,
-                       states.PROVIDE_V, states.PROVIDE_V_RETRY, states.SAVED,
-                       states.START, states.TERMINATED, states.REGISTERED]
-        sorted_agents = []
-        for state in print_order:
-            for agent_id in sorted_by_state[state]:
-                sorted_agents.append(agent_id)
-
         config.echo_json_response(self, 200, "Success", {
-                                  'uuids': sorted_agents})
+                                  'uuids': agent_list})
 
     def delete(self):
         """This method handles the DELETE requests to remove agents from the Cloud Verifier.
@@ -647,9 +644,9 @@ def get_tls_context():
 
     logger.info("Setting up client TLS in %s", tls_dir)
 
-    ca_path = "%s/%s" % (tls_dir, ca_cert)
-    my_tls_cert = "%s/%s" % (tls_dir, my_cert)
-    my_tls_priv_key = "%s/%s" % (tls_dir, my_priv_key)
+    ca_path = os.path.join(tls_dir, ca_cert)
+    my_tls_cert = os.path.join(tls_dir, my_cert)
+    my_tls_priv_key = os.path.join(tls_dir, my_priv_key)
 
     context = ssl.create_default_context()
     context.load_verify_locations(cafile=ca_path)

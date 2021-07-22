@@ -116,13 +116,6 @@ if not REQUIRE_ROOT:
 if not REQUIRE_ROOT:
     print("WARNING: running without root access")
 
-# Try and import cLime, if it fails set USE_CLIME to False.
-try:
-    import _cLime  # pylint: disable=W0611
-    USE_CLIME = True
-except ImportError:
-    USE_CLIME = False
-
 TPM_LIBS_PATH = '/usr/local/lib/'
 TPM_TOOLS_PATH = '/usr/local/bin/'
 
@@ -162,19 +155,27 @@ def get_config():
     return _CURRENT_CONFIG
 
 
-def get(section, option):
+def get(section, option, fallback=None):
+    if fallback is not None:
+        return get_config().get(section, option, fallback=fallback)
     return get_config().get(section, option)
 
 
-def getint(section, option):
+def getint(section, option, fallback=None):
+    if fallback is not None:
+        return get_config().get(section, option, fallback=fallback)
     return get_config().getint(section, option)
 
 
-def getboolean(section, option):
+def getboolean(section, option, fallback=None):
+    if fallback is not None:
+        return get_config().get(section, option, fallback=fallback)
     return get_config().getboolean(section, option)
 
 
-def getfloat(section, option):
+def getfloat(section, option, fallback=None):
+    if fallback is not None:
+        return get_config().get(section, option, fallback=fallback)
     return get_config().getfloat(section, option)
 
 
@@ -313,6 +314,9 @@ else:
 IMA_PCR = 10
 
 # measured boot addons
+# PCRs 0-7: BIOS & UEFI
+# PCRs 8-9: bootloader (grub)
+# PCR 14: MokList, MokListX, and MokSBState
 MEASUREDBOOT_PCRS = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 15]
 MEASUREDBOOT_ML = '/sys/kernel/security/tpm0/binary_bios_measurements'
 MEASUREDBOOT_IMPORTS = get_config().get('cloud_verifier', 'measured_boot_imports', fallback='').split(',')

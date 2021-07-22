@@ -63,11 +63,6 @@ else:
 global_password = None
 
 
-# def globalcb(*args):
-#    global global_password
-#    return global_password.encode()
-
-
 def setpassword(pw):
     global global_password
     if len(pw) == 0:
@@ -211,14 +206,6 @@ def cmd_certpkg(workingdir, name, insecure=False):
 
         with open("%s-private.pem" % name, 'r') as f:
             prot_priv = f.read()
-
-        # code to create a pem formatted protected private key using the keystore password
-    #     pk = EVP.load_key_string(str(priv[0][name]))
-    #     f = BIO.MemoryBuffer()
-    #     # globalcb will return the global password provided by the user
-    #     pk.save_key_bio(f, 'aes_256_cbc', globalcb)
-    #     prot_priv = f.getvalue()
-    #     f.close()
 
         # no compression to avoid extraction errors in tmpfs
         sf = io.BytesIO()

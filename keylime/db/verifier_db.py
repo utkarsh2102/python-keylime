@@ -7,6 +7,7 @@ import simplejson as json
 
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy import Column, String, Integer, PickleType, Text
+from sqlalchemy import schema
 
 
 Base = declarative_base()
@@ -22,6 +23,9 @@ class VerfierMain(Base):
                       primary_key=True)
     v = Column(String(45))
     ip = Column(String(15))
+    verifier_id = Column(String(80))
+    verifier_ip = Column(String(15))
+    verifier_port = Column(Integer)
     port = Column(Integer)
     operational_state = Column(Integer)
     public_key = Column(String(500))
@@ -38,3 +42,15 @@ class VerfierMain(Base):
     hash_alg = Column(String(10))
     enc_alg = Column(String(10))
     sign_alg = Column(String(10))
+
+
+class VerifierAllowlist(Base):
+    __tablename__ = 'allowlists'
+    __table_args__ = (
+        schema.UniqueConstraint('name', name='uniq_allowlists0name'),
+    )
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    tpm_policy = Column(Text())
+    vtpm_policy = Column(Text())
+    ima_policy = Column(Text(429400000))

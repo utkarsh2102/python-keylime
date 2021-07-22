@@ -379,7 +379,7 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
             self.u_set.add(u)
 
     def add_V(self, v):
-        """Threadsafe method for adding a U value received from the Cloud Verifier
+        """Threadsafe method for adding a V value received from the Cloud Verifier
         Do not modify u_set of v_set directly.
         """
         with uvLock:
@@ -450,9 +450,9 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
 
 
 def main():
-    if os.getuid() != 0 and config.REQUIRE_ROOT:
-        logger.critical("This process must be run as root.")
-        return
+    for ML in [ config.MEASUREDBOOT_ML, config.IMA_ML ] :
+        if not os.access(ML, os.F_OK) :
+            logger.warning("Measurement list path %s not accessible by agent. Any attempt to instruct it to access this path - via \"keylime_tenant\" CLI - will result in agent process dying", ML)
 
     if config.get('cloud_agent', 'agent_uuid') == 'dmidecode':
         if os.getuid() != 0:
@@ -471,6 +471,14 @@ def main():
     registrar_ip = config.get('cloud_agent', 'registrar_ip')
     registrar_port = config.get('cloud_agent', 'registrar_port')
 
+    # get params for the verifier to contact the agent
+    contact_ip = os.getenv("KEYLIME_AGENT_CONTACT_IP", None)
+    if contact_ip is None and config.has_option('cloud_agent', 'agent_contact_ip'):
+        contact_ip = config.get('cloud_agent', 'agent_contact_ip')
+    contact_port = os.getenv("KEYLIME_AGENT_CONTACT_PORT", None)
+    if contact_port is None and config.has_option('cloud_agent', 'agent_contact_port'):
+        contact_port = config.get('cloud_agent', 'agent_contact_port', fallback="invalid")
+
     # initialize the tmpfs partition to store keys if it isn't already available
     secdir = secure_mount.mount()
 
@@ -481,8 +489,6 @@ def main():
     (ekcert, ek_tpm, aik_tpm) = instance_tpm.tpm_init(self_activate=False, config_pw=config.get(
         'cloud_agent', 'tpm_ownerpassword'))  # this tells initialize not to self activate the AIK
     virtual_agent = instance_tpm.is_vtpm()
-    # try to get some TPM randomness into the system entropy pool
-    instance_tpm.init_system_rand()
 
     if ekcert is None:
         if virtual_agent:
@@ -504,8 +510,12 @@ def main():
     elif agent_uuid == 'dmidecode':
         cmd = ['dmidecode', '-s', 'system-uuid']
         ret = cmd_exec.run(cmd)
-        sys_uuid = ret['retout'].decode('utf-8')
+        sys_uuid = ret['retout'][0].decode('utf-8')
         agent_uuid = sys_uuid.strip()
+        try:
+            uuid.UUID(agent_uuid)
+        except ValueError as e:
+            raise RuntimeError("The UUID returned from dmidecode is invalid: %s" % e)  # pylint: disable=raise-missing-from
     elif agent_uuid == 'hostname':
         agent_uuid = socket.getfqdn()
     if config.STUB_VTPM and config.TPM_CANNED_VALUES is not None:
@@ -523,15 +533,17 @@ def main():
 
     # register it and get back a blob
     keyblob = registrar_client.doRegisterAgent(
-        registrar_ip, registrar_port, agent_uuid, ek_tpm, ekcert, aik_tpm)
+        registrar_ip, registrar_port, agent_uuid, ek_tpm, ekcert, aik_tpm, contact_ip, contact_port)
 
     if keyblob is None:
+        instance_tpm.flush_keys()
         raise Exception("Registration failed")
 
     # get the ephemeral registrar key
     key = instance_tpm.activate_identity(keyblob)
 
     if key is None:
+        instance_tpm.flush_keys()
         raise Exception("Activation failed")
 
     # tell the registrar server we know the key
@@ -540,6 +552,7 @@ def main():
         registrar_ip, registrar_port, agent_uuid, key)
 
     if not retval:
+        instance_tpm.flush_keys()
         raise Exception("Registration failed on activate")
 
     serveraddr = (config.get('cloud_agent', 'cloudagent_ip'),
