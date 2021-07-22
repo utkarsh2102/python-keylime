@@ -20,7 +20,6 @@ import tempfile
 import requests
 
 from cryptography.hazmat.primitives import serialization as crypto_serialization
-import simplejson as json
 
 from keylime.requests_client import RequestsClient
 from keylime.common import states
@@ -37,6 +36,7 @@ from keylime import ca_util
 from keylime.common import algorithms
 from keylime import ima_file_signatures
 from keylime import measured_boot
+from keylime import gpg
 
 # setup logging
 logger = keylime_logging.init_logging('tenant')
@@ -92,7 +92,8 @@ class Tenant():
         """
         self.nonce = None
         self.agent_ip = None
-        self.agent_port = config.get('cloud_agent', 'cloudagent_port')
+        self.verifier_id = None
+        self.agent_port = None
         self.verifier_ip = config.get('tenant', 'cloudverifier_ip')
         self.verifier_port = config.get('tenant', 'cloudverifier_port')
         self.registrar_ip = config.get('tenant', 'registrar_ip')
@@ -140,6 +141,100 @@ class Tenant():
 
         return my_cert, my_priv_key
 
+    def process_allowlist(self, args):
+        # Set up PCR values
+        tpm_policy = config.get('tenant', 'tpm_policy')
+        if "tpm_policy" in args and args["tpm_policy"] is not None:
+            tpm_policy = args["tpm_policy"]
+        self.tpm_policy = TPM_Utilities.readPolicy(tpm_policy)
+        logger.info("TPM PCR Mask from policy is %s", self.tpm_policy['mask'])
+
+        vtpm_policy = config.get('tenant', 'vtpm_policy')
+        if "vtpm_policy" in args and args["vtpm_policy"] is not None:
+            vtpm_policy = args["vtpm_policy"]
+        self.vtpm_policy = TPM_Utilities.readPolicy(vtpm_policy)
+        logger.info("TPM PCR Mask from policy is %s", self.vtpm_policy['mask'])
+
+        if len(args.get("ima_sign_verification_keys")) > 0:
+            # Auto-enable IMA (or-bit mask)
+            self.tpm_policy['mask'] = "0x%X" % (
+                    int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
+
+            # Add all IMA file signing verification keys to a keyring
+            ima_keyring = ima_file_signatures.ImaKeyring()
+            for filename in args["ima_sign_verification_keys"]:
+                pubkey, keyidv2 = ima_file_signatures.get_pubkey_from_file(filename)
+                if not pubkey:
+                    raise UserError(
+                        "File '%s' is not a file with a key" % filename)
+                ima_keyring.add_pubkey(pubkey, keyidv2)
+            self.ima_sign_verification_keys = ima_keyring.to_string()
+
+        # Read command-line path string allowlist
+        al_data = None
+
+        if "allowlist" in args and args["allowlist"] is not None:
+
+            self.enforce_pcrs(list(self.tpm_policy.keys()), [ config.IMA_PCR ], "IMA")
+
+            # Auto-enable IMA (or-bit mask)
+            self.tpm_policy['mask'] = "0x%X" % (
+                    int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
+
+            if isinstance(args["allowlist"], str):
+                if args["allowlist"] == "default":
+                    args["allowlist"] = config.get('tenant', 'allowlist')
+                al_data = ima.read_allowlist(args["allowlist"], args["allowlist_checksum"], args["allowlist_sig"], args["allowlist_sig_key"])
+            elif isinstance(args["allowlist"], list):
+                al_data = args["allowlist"]
+            else:
+                raise UserError("Invalid allowlist provided")
+
+        # Read command-line path string IMA exclude list
+        excl_data = None
+        if "ima_exclude" in args and args["ima_exclude"] is not None:
+            if isinstance(args["ima_exclude"], str):
+                if args["ima_exclude"] == "default":
+                    args["ima_exclude"] = config.get(
+                        'tenant', 'ima_excludelist')
+                excl_data = ima.read_excllist(args["ima_exclude"])
+            elif isinstance(args["ima_exclude"], list):
+                excl_data = args["ima_exclude"]
+            else:
+                raise UserError("Invalid exclude list provided")
+
+        # Set up IMA
+        if TPM_Utilities.check_mask(self.tpm_policy['mask'], config.IMA_PCR) or \
+                TPM_Utilities.check_mask(self.vtpm_policy['mask'],
+                                         config.IMA_PCR):
+            # Process allowlists
+            self.allowlist = ima.process_allowlists(al_data, excl_data)
+
+        # Read command-line path string TPM event log (measured boot) reference state
+        mb_refstate_data = None
+        if "mb_refstate" in args and args["mb_refstate"] is not None:
+
+            self.enforce_pcrs(list(self.tpm_policy.keys()), config.MEASUREDBOOT_PCRS, "measured boot")
+
+            # Auto-enable TPM event log mesured boot (or-bit mask)
+            for _pcr in config.MEASUREDBOOT_PCRS :
+                self.tpm_policy['mask'] = "0x%X" % (
+                    int(self.tpm_policy['mask'], 0) | (1 << _pcr))
+
+            logger.info("TPM PCR Mask automatically modified is %s to include IMA/Event log PCRs", self.tpm_policy['mask'])
+
+            if isinstance(args["mb_refstate"], str):
+                if args["mb_refstate"] == "default":
+                    args["mb_refstate"] = config.get('tenant', 'mb_refstate')
+                mb_refstate_data = measured_boot.read_mb_refstate(args["mb_refstate"])
+            else:
+                raise UserError("Invalid measured boot reference state (intended state) provided")
+
+        # Set up measured boot (TPM event log) reference state
+        if TPM_Utilities.check_mask(self.tpm_policy['mask'], config.MEASUREDBOOT_PCRS[2]) :
+            # Process measured boot reference state
+            self.mb_refstate = mb_refstate_data
+
     def init_add(self, args):
         """ Set up required values. Command line options can overwrite these config values
 
@@ -152,6 +247,32 @@ class Tenant():
         if 'agent_port' in args and args['agent_port'] is not None:
             self.agent_port = args['agent_port']
 
+        # try to get the port or ip from the registrar if it is missing
+        if self.agent_ip is None or self.agent_port is None:
+            registrar_client.init_client_tls("tenant")
+            data = registrar_client.getData(self.registrar_ip, self.registrar_port, self.agent_uuid)
+            if data is not None:
+                if self.agent_ip is None:
+                    if data['ip'] is not None:
+                        self.agent_ip = data['ip']
+                    else:
+                        raise UserError("No Ip was specified or found in the Registrar")
+
+                if self.agent_port is None and data['port'] is not None:
+                    self.agent_port = data["port"]
+
+        # If no agent port was found try to use the default from the config file
+        if self.agent_port is None:
+            self.agent_port = config.get('cloud_agent', 'cloudagent_port')
+
+        # Check if a contact ip and port for the agent was found
+        if self.agent_ip is None:
+            raise UserError("The contact ip address for the agent was not specified.")
+
+        if self.agent_port is None:
+            raise UserError("The contact port for the agent was not specified.")
+
+        # Now set the cv_agent_ip
         if 'cv_agent_ip' in args and args['cv_agent_ip'] is not None:
             self.cv_cloudagent_ip = args['cv_agent_ip']
         else:
@@ -179,98 +300,7 @@ class Tenant():
         self.accept_tpm_signing_algs = config.get(
             'tenant', 'accept_tpm_signing_algs').split(',')
 
-        # Set up PCR values
-        tpm_policy = config.get('tenant', 'tpm_policy')
-        if "tpm_policy" in args and args["tpm_policy"] is not None:
-            tpm_policy = args["tpm_policy"]
-        self.tpm_policy = TPM_Utilities.readPolicy(tpm_policy)
-        logger.info("TPM PCR Mask from policy is %s", self.tpm_policy['mask'])
-
-        vtpm_policy = config.get('tenant', 'vtpm_policy')
-        if "vtpm_policy" in args and args["vtpm_policy"] is not None:
-            vtpm_policy = args["vtpm_policy"]
-        self.vtpm_policy = TPM_Utilities.readPolicy(vtpm_policy)
-        logger.info("TPM PCR Mask from policy is %s", self.vtpm_policy['mask'])
-
-        if args.get("ima_sign_verification_keys") is not None:
-            # Auto-enable IMA (or-bit mask)
-            self.tpm_policy['mask'] = "0x%X" % (
-                int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
-
-            # Add all IMA file signing verification keys to a keyring
-            ima_keyring = ima_file_signatures.ImaKeyring()
-            for filename in args["ima_sign_verification_keys"]:
-                pubkey = ima_file_signatures.get_pubkey_from_file(filename)
-                if not pubkey:
-                    raise UserError("File '%s' is not a file with a key" % filename)
-                ima_keyring.add_pubkey(pubkey)
-            self.ima_sign_verification_keys = ima_keyring.to_string()
-
-        # Read command-line path string allowlist
-        al_data = None
-
-        if "allowlist" in args and args["allowlist"] is not None:
-
-            self.enforce_pcrs(list(self.tpm_policy.keys()), [ config.IMA_PCR ], "IMA")
-
-            # Auto-enable IMA (or-bit mask)
-            self.tpm_policy['mask'] = "0x%X" % (
-                int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
-
-            if isinstance(args["allowlist"], str):
-                if args["allowlist"] == "default":
-                    args["allowlist"] = config.get('tenant', 'allowlist')
-                al_data = ima.read_allowlist(args["allowlist"], args["allowlist_checksum"], args["allowlist_sig"], args["allowlist_sig_key"])
-            elif isinstance(args["allowlist"], list):
-                al_data = args["allowlist"]
-            else:
-                raise UserError("Invalid allowlist provided")
-
-        # Read command-line path string IMA exclude list
-        excl_data = None
-        if "ima_exclude" in args and args["ima_exclude"] is not None:
-            if isinstance(args["ima_exclude"], str):
-                if args["ima_exclude"] == "default":
-                    args["ima_exclude"] = config.get(
-                        'tenant', 'ima_excludelist')
-                excl_data = ima.read_excllist(args["ima_exclude"])
-            elif isinstance(args["ima_exclude"], list):
-                excl_data = args["ima_exclude"]
-            else:
-                raise UserError("Invalid exclude list provided")
-
-        # Set up IMA
-        if TPM_Utilities.check_mask(self.tpm_policy['mask'], config.IMA_PCR) or \
-                TPM_Utilities.check_mask(self.vtpm_policy['mask'], config.IMA_PCR):
-
-            # Process allowlists
-            self.allowlist = ima.process_allowlists(al_data, excl_data)
-
-        # Read command-line path string TPM event log (measured boot) reference state
-        mb_refstate_data = None
-        if "mb_refstate" in args and args["mb_refstate"] is not None:
-
-            self.enforce_pcrs(list(self.tpm_policy.keys()), config.MEASUREDBOOT_PCRS, "measured boot")
-
-            # Auto-enable TPM event log mesured boot (or-bit mask)
-            for _pcr in config.MEASUREDBOOT_PCRS :
-                self.tpm_policy['mask'] = "0x%X" % (
-                    int(self.tpm_policy['mask'], 0) | (1 << _pcr))
-
-            logger.info("TPM PCR Mask automatically modified is %s to include IMA/Event log PCRs", self.tpm_policy['mask'])
-
-            if isinstance(args["mb_refstate"], str):
-                if args["mb_refstate"] == "default":
-                    args["mb_refstate"] = config.get('tenant', 'mb_refstate')
-                mb_refstate_data = measured_boot.read_mb_refstate(args["mb_refstate"])
-            else:
-                raise UserError("Invalid measured boot reference state (intended state) provided")
-
-        # Set up measured boot (TPM event log) reference state
-        if TPM_Utilities.check_mask(self.tpm_policy['mask'], config.MEASUREDBOOT_PCRS[2]) :
-
-            # Process measured boot reference state
-            self.mb_refstate = measured_boot.process_refstate(mb_refstate_data)
+        self.process_allowlist(args)
 
         # if none
         if (args["file"] is None and args["keyfile"] is None and args["ca_dir"] is None):
@@ -390,7 +420,7 @@ class Tenant():
             cert_pkg = sf.getvalue()
 
             # put the private key into the data to be send to the CV
-            self.revocation_key = privkey
+            self.revocation_key = privkey.decode('utf-8')
 
             # encrypt up the cert package
             ret = user_data_encrypt.encrypt(cert_pkg)
@@ -462,19 +492,19 @@ class Tenant():
             [type] -- [description]
         """
         registrar_client.init_client_tls('tenant')
-        reg_keys = registrar_client.getKeys(
+        reg_data = registrar_client.getData(
             self.registrar_ip, self.registrar_port, self.agent_uuid)
-        if reg_keys is None:
+        if reg_data is None:
             logger.warning("AIK not found in registrar, quote not validated")
             return False
 
-        if not self.tpm_instance.check_quote(self.agent_uuid, self.nonce, public_key, quote, reg_keys['aik_tpm'], hash_alg=hash_alg):
-            if reg_keys['regcount'] > 1:
+        if not self.tpm_instance.check_quote(self.agent_uuid, self.nonce, public_key, quote, reg_data['aik_tpm'], hash_alg=hash_alg):
+            if reg_data['regcount'] > 1:
                 logger.error("WARNING: This UUID had more than one ek-ekcert registered to it! This might indicate that your system is misconfigured or a malicious host is present. Run 'regdelete' for this agent and restart")
                 sys.exit()
             return False
 
-        if reg_keys['regcount'] > 1:
+        if reg_data['regcount'] > 1:
             logger.warning("WARNING: This UUID had more than one ek-ekcert registered to it! This might indicate that your system is misconfigured. Run 'regdelete' for this agent and restart")
 
         if not config.STUB_TPM and (not config.getboolean('tenant', 'require_ek_cert') and config.get('tenant', 'ek_check_script') == ""):
@@ -482,11 +512,11 @@ class Tenant():
                 "DANGER: EK cert checking is disabled and no additional checks on EKs have been specified with ek_check_script option. Keylime is not secure!!")
 
         # check EK cert and make sure it matches EK
-        if not self.check_ek(reg_keys['ekcert']):
+        if not self.check_ek(reg_data['ekcert']):
             return False
         # if agent is virtual, check phyisical EK cert and make sure it matches phyiscal EK
-        if 'provider_keys' in reg_keys:
-            if not self.check_ek(reg_keys['provider_keys']['ekcert']):
+        if 'provider_keys' in reg_data:
+            if not self.check_ek(reg_data['provider_keys']['ekcert']):
                 return False
 
         # check all EKs with optional script:
@@ -502,18 +532,18 @@ class Tenant():
         env = os.environ.copy()
         env['AGENT_UUID'] = self.agent_uuid
         env['EK'] = tpm2_objects.pubkey_from_tpm2b_public(
-            base64.b64decode(reg_keys['ek_tpm']),
+            base64.b64decode(reg_data['ek_tpm']),
             ).public_bytes(
                 crypto_serialization.Encoding.PEM,
                 crypto_serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-        env['EK_TPM'] = reg_keys['ek_tpm']
-        if reg_keys['ekcert'] is not None:
-            env['EK_CERT'] = reg_keys['ekcert']
+        env['EK_TPM'] = reg_data['ek_tpm']
+        if reg_data['ekcert'] is not None:
+            env['EK_CERT'] = reg_data['ekcert']
         else:
             env['EK_CERT'] = ""
 
-        env['PROVKEYS'] = json.dumps(reg_keys.get('provider_keys', {}))
+        env['PROVKEYS'] = json.dumps(reg_data.get('provider_keys', {}))
         proc = subprocess.Popen(script, env=env, shell=True,
                                 cwd=config.WORK_DIR, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT)
@@ -574,7 +604,7 @@ class Tenant():
             logger.error("POST command response: %s Unexpected response from Cloud Verifier: %s", response.status_code, response.text)
             sys.exit()
 
-    def do_cvstatus(self, listing=False):
+    def do_cvstatus(self, listing=False, returnresponse=False, bulk=False):
         """ Perform opertional state look up for agent
 
         Keyword Arguments:
@@ -584,12 +614,30 @@ class Tenant():
         if not listing:
             agent_uuid = self.agent_uuid
 
+        response = None
         do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
-        response = do_cvstatus.get(
-            (f'/agents/{agent_uuid}'),
-            cert=self.cert,
-            verify=False
-        )
+        if listing and (self.verifier_id is not None):
+            verifier_id = self.verifier_id
+            response = do_cvstatus.get(
+                (f'/agents/?verifier={verifier_id}'),
+                cert=self.cert,
+                verify=False
+            )
+        elif (not listing) and (bulk):
+            verifier_id = ""
+            if self.verifier_id is not None:
+                verifier_id = self.verifier_id
+            response = do_cvstatus.get(
+                (f'/agents/?bulk={bulk}&verifier={verifier_id}'),
+                cert=self.cert,
+                verify=False
+            )
+        else:
+            response = do_cvstatus.get(
+                (f'/agents/{agent_uuid}'),
+                cert=self.cert,
+                verify=False
+            )
 
         if response.status_code == 503:
             logger.error("Cannot connect to Verifier at %s with Port %s. Connection refused.", self.verifier_ip, self.verifier_port)
@@ -607,16 +655,31 @@ class Tenant():
             sys.exit()
         else:
             response_json = response.json()
-            if not listing:
-                operational_state = response_json["results"]["operational_state"]
-                logger.info('Agent Status: "%s"', states.state_to_str(operational_state))
+            if not returnresponse:
+                if not listing:
+                    if not bulk:
+                        operational_state = response_json["results"]["operational_state"]
+                        logger.info('Agent Status: "%s"', states.state_to_str(operational_state))
+                    else:
+                        for agent in response_json["results"].keys():
+                            response_json["results"][agent]["operational_state"] = states.state_to_str(response_json["results"][agent]["operational_state"])
+                        logger.info("Bulk Agent Info:\n%s" % json.dumps(response_json["results"]))
+                else:
+                    agent_array = response_json["results"]["uuids"]
+                    logger.info('Agents: "%s"', agent_array)
             else:
-                agent_array = response_json["results"]["uuids"]
-                logger.info('Agents: "%s"', agent_array)
+                return response_json["results"]
 
-    def do_cvdelete(self):
+        return None
+
+    def do_cvdelete(self, verifier_check):
         """Delete agent from Verifier
         """
+        if verifier_check:
+            agent_json = self.do_cvstatus(listing=False, returnresponse=True)
+            self.verifier_ip = agent_json["verifier_ip"]
+            self.verifier_port = agent_json["verifier_port"]
+
         do_cvdelete = RequestsClient(self.verifier_base_url, self.tls_enabled)
         response = do_cvdelete.delete(
             (f'/agents/{self.agent_uuid}'),
@@ -642,7 +705,7 @@ class Tenant():
                     verify=False
                 )
 
-                if response.status_code in (200, 404):
+                if response.status_code == 404:
                     deleted = True
                     break
                 time.sleep(.4)
@@ -673,9 +736,14 @@ class Tenant():
         registrar_client.doRegistrarDelete(
             self.registrar_ip, self.registrar_port, self.agent_uuid)
 
-    def do_cvreactivate(self):
+    def do_cvreactivate(self, verifier_check):
         """ Reactive Agent
         """
+        if verifier_check:
+            agent_json = self.do_cvstatus(listing=False, returnresponse=True)
+            self.verifier_ip = agent_json['verifier_ip']
+            self.verifier_port = agent_json['verifier_port']
+
         do_cvreactivate = RequestsClient(
             self.verifier_base_url, self.tls_enabled)
         response = do_cvreactivate.put(
@@ -814,12 +882,12 @@ class Tenant():
             b64_encrypted_u = base64.b64encode(encrypted_U)
             logger.debug("b64_encrypted_u: %s", b64_encrypted_u.decode('utf-8'))
             data = {
-                'encrypted_key': b64_encrypted_u,
+                'encrypted_key': b64_encrypted_u.decode('utf-8'),
                 'auth_tag': self.auth_tag
             }
 
             if self.payload is not None:
-                data['payload'] = self.payload
+                data['payload'] = self.payload.decode('utf-8')
 
             u_json_message = json.dumps(data)
 
@@ -904,6 +972,41 @@ class Tenant():
                 continue
             break
 
+    def do_add_allowlist(self, args):
+        if 'allowlist_name' not in args or not args['allowlist_name']:
+            raise UserError('allowlist_name is required to add an allowlist')
+
+        allowlist_name = args['allowlist_name']
+        self.process_allowlist(args)
+        data = {
+            'tpm_policy': json.dumps(self.tpm_policy),
+            'vtpm_policy': json.dumps(self.vtpm_policy),
+            'allowlist': json.dumps(self.allowlist)
+        }
+        body = json.dumps(data)
+        cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        response = cv_client.post(f'/allowlists/{allowlist_name}', data=body,
+                                  cert=self.cert, verify=False)
+        print(response.json())
+
+    def do_delete_allowlist(self, name):
+        cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        response = cv_client.delete(f'/allowlists/{name}',
+                                    cert=self.cert, verify=False)
+        print(response.json())
+
+    def do_show_allowlist(self, name):
+        cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        response = cv_client.get(f'/allowlists/{name}',
+                                 cert=self.cert, verify=False)
+        print(f"Show allowlist command response: {response.status_code}.")
+        print(response.json())
+
+def write_to_namedtempfile(data, delete_tmp_files):
+    temp = tempfile.NamedTemporaryFile(prefix="keylime-", delete=delete_tmp_files)
+    temp.write(data)
+    temp.flush()
+    return temp.name
 
 def main(argv=sys.argv):
     """[summary]
@@ -918,15 +1021,25 @@ def main(argv=sys.argv):
     """
     parser = argparse.ArgumentParser(argv[0])
     parser.add_argument('-c', '--command', action='store', dest='command', default='add',
-                        help="valid commands are add,delete,update,status,list,reactivate,regdelete. defaults to add")
+                        help="valid commands are add,delete,update,status,list,reactivate,regdelete,bulkinfo. defaults to add")
     parser.add_argument('-t', '--targethost', action='store',
                         dest='agent_ip', help="the IP address of the host to provision")
     parser.add_argument('-tp', '--targetport', action='store',
                         dest='agent_port', help="the Port of the host to provision")
+    parser.add_argument('-r', '--registrarhost', action='store',
+                        dest='registrar_ip', help="the IP address of the registrar where to retrieve the agents data from.")
+    parser.add_argument('-rp', '--registrarport', action="store",
+                        dest='registrar_port', help="the port of the registrar.")
     parser.add_argument('--cv_targethost', action='store', default=None, dest='cv_agent_ip',
                         help='the IP address of the host to provision that the verifier will use (optional).  Use only if different than argument to option -t/--targethost')
     parser.add_argument('-v', '--cv', action='store', dest='verifier_ip',
                         help="the IP address of the cloud verifier")
+    parser.add_argument('-vp', '--cvport', action='store', dest='verifier_port',
+                        help="the port of the cloud verifier")
+    parser.add_argument('-vi', '--cvid', action='store', dest='verifier_id',
+                        help="the unique identifier of a cloud verifier")
+    parser.add_argument('-nvc', '--no-verifier-check', action='store_false', dest='verifier_check', default=True,
+                        help='Disable the check to confirm if the agent is being processed by the specified verifier. Use only with -c/--command delete or reactivate')
     parser.add_argument('-u', '--uuid', action='store',
                         dest='agent_uuid', help="UUID for the agent to provision")
     parser.add_argument('-f', '--file', action='store', default=None,
@@ -941,8 +1054,20 @@ def main(argv=sys.argv):
                         help="Include additional files in provided directory in certificate zip file.  Must be specified with --cert")
     parser.add_argument('--allowlist', action='store', dest='allowlist',
                         default=None, help="Specify the file path of an allowlist")
-    parser.add_argument('--sign_verification_key', action='append', dest='ima_sign_verification_keys',
-                        default=None, help="Specify an IMA file signature verification key")
+    parser.add_argument('--signature-verification-key', '--sign_verification_key', action='append', dest='ima_sign_verification_keys',
+                        default=[], help="Specify an IMA file signature verification key")
+    parser.add_argument('--signature-verification-key-sig', action='append', dest='ima_sign_verification_key_sigs',
+                        default=[], help="Specify the GPG signature file for an IMA file signature verification key; pair this option with --signature-verification-key")
+    parser.add_argument('--signature-verification-key-sig-key', action='append', dest='ima_sign_verification_key_sig_keys',
+                        default=[], help="Specify the GPG public key file use to validate the --signature-verification-key-sig; pair this option with --signature-verification-key")
+    parser.add_argument('--signature-verification-key-url', action='append', dest='ima_sign_verification_key_urls',
+                        default=[], help="Specify the URL for a remote IMA file signature verification key")
+    parser.add_argument('--signature-verification-key-sig-url', action='append',
+                        dest='ima_sign_verification_key_sig_urls',
+                        default=[], help="Specify the URL for the remote GPG signature of a remote IMA file signature verification key; pair this option with --signature-verification-key-url")
+    parser.add_argument('--signature-verification-key-sig-url-key', action='append',
+                        dest='ima_sign_verification_key_sig_url_keys',
+                        default=[], help="Specify the GPG public key file used to validate the --signature-verification-key-sig-url; pair this option with --signature-verification-key-url")
     parser.add_argument('--mb_refstate', action='store', dest='mb_refstate',
                         default=None, help="Specify the location of a measure boot reference state (intended state)")
     parser.add_argument('--allowlist-checksum', action='store', dest='allowlist_checksum',
@@ -963,6 +1088,7 @@ def main(argv=sys.argv):
                         default=None, help="Specify a vTPM policy in JSON format")
     parser.add_argument('--verify', action='store_true', default=False,
                         help='Block on cryptographically checked key derivation confirmation from the agent once it has been provisioned')
+    parser.add_argument('--allowlist-name', help='The name of allowlist to operate with')
 
     args = parser.parse_args(argv[1:])
 
@@ -986,10 +1112,6 @@ def main(argv=sys.argv):
 
     mytenant = Tenant()
 
-    if args.command not in ['list', 'regdelete', 'reglist', 'delete', 'status'] and args.agent_ip is None:
-        raise UserError(
-            f"-t/--targethost is required for command {args.command}")
-
     if args.agent_uuid is not None:
         mytenant.agent_uuid = args.agent_uuid
         # if the uuid is actually a public key, then hash it
@@ -1010,8 +1132,17 @@ def main(argv=sys.argv):
             raise UserError("Command %s not found in canned JSON!" %
                             ("add_vtpm_to_group"))
 
+    if args.verifier_id is not None:
+        mytenant.verifier_id = args.verifier_id
     if args.verifier_ip is not None:
         mytenant.verifier_ip = args.verifier_ip
+    if args.verifier_port is not None:
+        mytenant.verifier_port = args.verifier_port
+
+    if args.registrar_ip is not None:
+        mytenant.registrar_ip = args.registrar_ip
+    if args.registrar_port is not None:
+        mytenant.registrar_port = args.registrar_port
 
     # we only need to fetch remote files if we are adding or updateing
     if args.command in ['add', 'update']:
@@ -1021,11 +1152,8 @@ def main(argv=sys.argv):
             logger.info("Downloading Allowlist from %s", args.allowlist_url)
             response = requests.get(args.allowlist_url, allow_redirects=False)
             if response.status_code == 200:
-                allowlist_temp = tempfile.NamedTemporaryFile(prefix="keylime-", delete=delete_tmp_files)
-                allowlist_temp.write(response.content)
-                allowlist_temp.flush()
-                args.allowlist = allowlist_temp.name
-                logger.debug("Allowlist temporarily saved in %s" % (allowlist_temp.name))
+                args.allowlist = write_to_namedtempfile(response.content, delete_tmp_files)
+                logger.debug("Allowlist temporarily saved in %s" % args.allowlist)
             else:
                 raise Exception("Downloading allowlist (%s) failed with status code %s!" % (args.allowlist_url, response.status_code))
 
@@ -1033,13 +1161,56 @@ def main(argv=sys.argv):
             logger.info("Downloading Allowlist signature from %s", args.allowlist_sig_url)
             response = requests.get(args.allowlist_sig_url, allow_redirects=False)
             if response.status_code == 200:
-                sig_temp = tempfile.NamedTemporaryFile(prefix="keylime-", delete=delete_tmp_files)
-                sig_temp.write(response.content)
-                sig_temp.flush()
-                args.allowlist_sig = sig_temp.name
-                logger.debug("Allowlist signature temporarily saved in %s", sig_temp.name)
+                args.allowlist_sig = write_to_namedtempfile(response.content, delete_tmp_files)
+                logger.debug("Allowlist signature temporarily saved in %s", args.allowlist_sig)
             else:
                 raise Exception("Downloading allowlist signature (%s) failed with status code %s!" % (args.allowlist_sig_url, response.status_code))
+
+        # verify all the local keys for which we have a signature file and a key to verify
+        for i, key_file in enumerate(args.ima_sign_verification_keys):
+            if len(args.ima_sign_verification_key_sigs) <= i:
+                break
+            keysig_file = args.ima_sign_verification_key_sigs[i]
+            if len(args.ima_sign_verification_key_sig_keys) == 0:
+                raise UserError("A gpg key is missing for key signature file '%s'" % keysig_file)
+
+            gpg_key_file = args.ima_sign_verification_key_sig_keys[i]
+            gpg.gpg_verify_filesignature(gpg_key_file, key_file, keysig_file, "IMA file signing key")
+
+            logger.info("Signature verification on %s was successful" % key_file)
+
+        # verify all the remote keys for which we have a signature URL and key to to verify
+        # Append the downloaded key files to args.ima_sign_verification_keys
+        for i, key_url in enumerate(args.ima_sign_verification_key_urls):
+
+            logger.info("Downloading key from %s", key_url)
+            response = requests.get(key_url, allow_redirects=False)
+            if response.status_code == 200:
+                key_file = write_to_namedtempfile(response.content, delete_tmp_files)
+                args.ima_sign_verification_keys.append(key_file)
+                logger.debug("Key temporarily saved in %s" % key_file)
+            else:
+                raise Exception("Downloading key (%s) failed with status code %s!" % (key_url, response.status_code))
+
+            if len(args.ima_sign_verification_key_sig_urls) <= i:
+                continue
+
+            keysig_url = args.ima_sign_verification_key_sig_urls[i]
+
+            if len(args.ima_sign_verification_key_sig_url_keys) == 0:
+                raise UserError("A gpg key is missing for key signature URL '%s'" % keysig_url)
+
+            logger.info("Downloading key signature from %s" % keysig_url)
+            response = requests.get(keysig_url, allow_redirects=False)
+            if response.status_code == 200:
+                keysig_file = write_to_namedtempfile(response.content, delete_tmp_files)
+                logger.debug("Key signature temporarily saved in %s" % keysig_file)
+            else:
+                raise Exception("Downloading key signature (%s) failed with status code %s!" % (key_url, response.status_code))
+
+            gpg_key_file = args.ima_sign_verification_key_sig_url_keys[i]
+            gpg.gpg_verify_filesignature(gpg_key_file, key_file, keysig_file, "IMA file signing key")
+            logger.info("Signature verification on %s was successful" % key_url)
 
     if args.command == 'add':
         mytenant.init_add(vars(args))
@@ -1050,23 +1221,31 @@ def main(argv=sys.argv):
             mytenant.do_verify()
     elif args.command == 'update':
         mytenant.init_add(vars(args))
-        mytenant.do_cvdelete()
+        mytenant.do_cvdelete(args.verifier_check)
         mytenant.preloop()
         mytenant.do_cv()
         mytenant.do_quote()
         if args.verify:
             mytenant.do_verify()
     elif args.command == 'delete':
-        mytenant.do_cvdelete()
+        mytenant.do_cvdelete(args.verifier_check)
     elif args.command == 'status':
         mytenant.do_cvstatus()
+    elif args.command == 'bulkinfo':
+        mytenant.do_cvstatus(bulk=True)
     elif args.command == 'list':
         mytenant.do_cvstatus(listing=True)
     elif args.command == 'reactivate':
-        mytenant.do_cvreactivate()
+        mytenant.do_cvreactivate(args.verifier_check)
     elif args.command == 'reglist':
         mytenant.do_reglist()
     elif args.command == 'regdelete':
         mytenant.do_regdelete()
+    elif args.command == 'addallowlist':
+        mytenant.do_add_allowlist(vars(args))
+    elif args.command == 'showallowlist':
+        mytenant.do_show_allowlist(args.allowlist_name)
+    elif args.command == 'deleteallowlist':
+        mytenant.do_delete_allowlist(args.allowlist_name)
     else:
         raise UserError("Invalid command specified: %s" % (args.command))

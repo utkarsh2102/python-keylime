@@ -27,6 +27,9 @@ from keylime import ima_file_signatures
 logger = keylime_logging.init_logging('cloudverifier_common')
 
 GLOBAL_TPM_INSTANCE = None
+DEFAULT_VERIFIER_ID = "default"
+
+
 def get_tpm_instance():
     global GLOBAL_TPM_INSTANCE
     if GLOBAL_TPM_INSTANCE is None:
@@ -154,14 +157,14 @@ def process_quote_response(agent, json_response):
         agent['provide_V'] = False
         received_public_key = agent['public_key']
 
-    if agent.get('registrar_keys', "") == "":
+    if agent.get('registrar_data', "") == "":
         registrar_client.init_client_tls('cloud_verifier')
-        registrar_keys = registrar_client.getKeys(config.get("cloud_verifier", "registrar_ip"), config.get(
+        registrar_data = registrar_client.getData(config.get("cloud_verifier", "registrar_ip"), config.get(
             "cloud_verifier", "registrar_port"), agent['agent_id'])
-        if registrar_keys is None:
+        if registrar_data is None:
             logger.warning("AIK not found in registrar, quote not validated")
             return False
-        agent['registrar_keys'] = registrar_keys
+        agent['registrar_data'] = registrar_data
 
     hash_alg = json_response.get('hash_alg')
     enc_alg = json_response.get('enc_alg')
@@ -193,7 +196,7 @@ def process_quote_response(agent, json_response):
         agent['nonce'],
         received_public_key,
         quote,
-        agent['registrar_keys']['aik_tpm'],
+        agent['registrar_data']['aik_tpm'],
         agent['tpm_policy'],
         ima_measurement_list,
         agent['allowlist'],
@@ -291,6 +294,9 @@ def process_get_status(agent):
                 'hash_alg': agent.hash_alg,
                 'enc_alg': agent.enc_alg,
                 'sign_alg': agent.sign_alg,
+                'verifier_id' : agent.verifier_id,
+                'verifier_ip' : agent.verifier_ip,
+                'verifier_port' : agent.verifier_port,
                 }
     return response
 
