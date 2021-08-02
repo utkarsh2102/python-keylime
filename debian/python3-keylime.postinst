@@ -30,6 +30,11 @@ case "$1" in
         chown -R keylime:tss /var/lib/keylime
     fi
 
+    # Set permissions of /var/lib/keylime/secure for keylime_agent
+    if [ -d /var/lib/keylime/secure ] && getent passwd keylime >/dev/null; then
+        chown -R keylime:tss /var/lib/keylime/secure
+    fi
+
     ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)
