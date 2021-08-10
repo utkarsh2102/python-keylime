@@ -1,3 +1,14 @@
+keylime (6.1.1-1~ibmcloud0.1) bionic; urgency=medium
+
+  * New upstream version 6.1.1.
+  * Revert "Don't run keylime_agent as non-root for now".
+    - Upstream has implemented this via #666 so it doesn't
+      need to be root anymore.
+  * d/p/embed-dataclasses-module.patch: Add patch to embed
+    dataclasses module in the package.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Thu, 22 Jul 2021 23:39:24 +0530
+
 keylime (6.1.0-1~ibmcloud0.2) bionic; urgency=medium
 
   * Add needed Python modules to 'Depends'.
