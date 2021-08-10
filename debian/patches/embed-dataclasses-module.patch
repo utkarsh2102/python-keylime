@@ -18,12 +18,16 @@ Last-Update: 2021-08-05
 
 --- a/keylime/ima_ast.py
 +++ b/keylime/ima_ast.py
-@@ -13,7 +13,7 @@
+@@ -13,7 +13,11 @@ import codecs
  import hashlib
  import struct
  import abc
 -import dataclasses
-+import keylime.dataclasses as dataclasses
++import sys
++if sys.version_info >= (3,7):
++    import dataclasses
++else:
++    import keylime.dataclasses as dataclasses
  
  from typing import Dict, Callable, Any, Optional
  from keylime import keylime_logging
