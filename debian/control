@@ -3,6 +3,7 @@ Maintainer: Utkarsh Gupta <utkarsh.gupta@canonical.com>
 Section: python
 Priority: optional
 Build-Depends: debhelper (>= 11),
+               dh-exec,
                dh-python,
                libtss2-dev,
                python3-alembic,
