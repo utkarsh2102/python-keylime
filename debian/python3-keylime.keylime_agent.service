@@ -11,6 +11,8 @@ ConditionPathExistsGlob=/dev/tpmrm[0-9]*
 User=keylime
 Group=tss
 Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0
+ExecStartPre=-+chown -hHR keylime:tss /sys/kernel/security/tpm0
+ExecStartPre=-+chown -hHR keylime:tss /sys/kernel/security/ima
 ExecStart=/usr/bin/keylime_agent
 TimeoutSec=60s
 Restart=on-failure
