@@ -6,6 +6,8 @@ StartLimitBurst=5
 
 [Service]
 Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0
+Group=tss
+User=keylime
 ExecStart=/usr/bin/keylime_verifier
 Restart=on-failure
 TimeoutSec=60s
