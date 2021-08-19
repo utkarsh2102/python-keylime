@@ -1,15 +1,18 @@
 [Unit]
 Description=The Keylime registrar service
-After=network.target
+After=network.target keylime_verifier.service
+Requires=keylime_verifier.service
+ConditionPathExists=/var/lib/keylime/cv_ca/cacert.crt
 StartLimitInterval=10s
 StartLimitBurst=5
 
 [Service]
 Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0
 ExecStart=/usr/bin/keylime_registrar
-TimeoutSec=60s
 Restart=on-failure
+TimeoutSec=60s
 RestartSec=120s
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=keylime_agent.service

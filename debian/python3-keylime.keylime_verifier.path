@@ -1,0 +1,13 @@
+[Unit]
+Description=Monitor the cert exits
+Before=keylime_registrar.service
+
+[Service]
+Type=oneshot
+
+[Path]
+PathExists=/var/lib/keylime/cv_ca/cacert.crt
+Unit=keylime_registrar.service
+
+[Install]
+WantedBy=multi-user.target
