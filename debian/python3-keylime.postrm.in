@@ -1,0 +1,40 @@
+#!/bin/sh
+
+set -e
+
+KEYLIME_PART=@keylime_part@
+KEYLIME_DIR=/var/lib/keylime
+KEYLIME_MOUNT=/var/lib/keylime/secure
+KEYLIME_LOG_DIR=/var/log/keylime
+
+if [ "$1" = "purge" ]; then
+  # umount /var/lib/keylime/secure if it's mounted.
+  if [ "${KEYLIME_PART}" = "agent" ]  && grep -qs '/var/lib/keylime/secure' /proc/mounts; then
+    umount $KEYLIME_MOUNT
+  fi
+
+  rm -rf "${KEYLIME_DIR}/python3-keylime-${KEYLIME_PART}.installed"
+
+  if [ "${KEYLIME_PART}" = "agent" ]; then
+    rm -rf "${KEYLIME_DIR}/encrypted_payload"
+    rm -rf "${KEYLIME_DIR}/secure"
+    rm -rf "${KEYLIME_DIR}/tpmdata.yml"
+  fi
+
+  if [ "${KEYLIME_PART}" = "server" ]; then
+    # Only the server uses the log directory
+    rm -rf /var/log/keylime
+    rm -rf "${KEYLIME_DIR}/cv_ca"
+    for db in $(find ${KEYLIME_DIR} -name '*.sqlite'); do
+      rm -rf ${db}
+    done
+  fi
+
+  # remove /var/lib/keylime directory only if the other part is not installed anymore
+  if [ -d $KEYLIME_DIR ] && [ ! -f $KEYLIME_DIR/python3-keylime-server.installed ] \
+     && [ ! -f $KEYLIME_DIR/python3-keylime-agent.installed ]; then
+    rm -rf "${KEYLIME_DIR}"
+  fi
+fi
+
+#DEBHELPER#

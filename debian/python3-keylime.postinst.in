@@ -1,6 +1,7 @@
 #!/bin/sh
 
 set -e
+KEYLIME_PART=@keylime_part@
 
 case "$1" in
     configure)
@@ -25,9 +26,17 @@ case "$1" in
                 keylime
     fi
 
+    # Mark what part is installed
+    touch "/var/lib/keylime/python3-keylime-${KEYLIME_PART}.installed"
+
     # Setting owner
     if [ -d /var/lib/keylime ] && getent passwd keylime >/dev/null; then
         chown -R keylime:tss /var/lib/keylime
+    fi
+
+    # Setting owner of log dir of server
+    if [ "${KEYLIME_PART}" = "server" ] && [ -d /var/log/keylime ] && getent passwd keylime >/dev/null; then
+        chown -R keylime:tss /var/log/keylime
     fi
 
     ;;

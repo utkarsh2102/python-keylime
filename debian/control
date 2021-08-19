@@ -3,6 +3,7 @@ Maintainer: Utkarsh Gupta <utkarsh.gupta@canonical.com>
 Section: python
 Priority: optional
 Build-Depends: debhelper (>= 11),
+               dh-exec,
                dh-python,
                libtss2-dev,
                python3-alembic,
@@ -51,3 +52,15 @@ Description: TPM-based key bootstrapping and system integrity measurement
  flexible framework for the remote attestation of any given `PCR` (Platform
  Configuration Register). Users can create their own customized actions that
  will trigger when a machine fails its attested measurements.
+
+Package: python3-keylime-server
+Architecture: all
+Depends: python3-keylime,
+         ${misc:Depends}
+Description: Keylime server components.
+
+Package: python3-keylime-agent
+Architecture: all
+Depends: python3-keylime,
+         ${misc:Depends}
+Description: Keylime agent.
