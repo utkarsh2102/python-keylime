@@ -36,7 +36,7 @@ case "$1" in
 
     # Setting owner of log dir of server
     if [ "${KEYLIME_PART}" = "server" ] && [ -d /var/log/keylime ] && getent passwd keylime >/dev/null; then
-        chown -R keylime:tss /var/log/keylime
+        chown keylime:tss /var/log/keylime
     fi
 
     ;;
