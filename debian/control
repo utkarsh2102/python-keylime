@@ -68,7 +68,8 @@ Architecture: all
 Depends: adduser,
          python3-keylime-lib,
          python3,
-         ${misc:Depends}
+         ${misc:Depends},
+         ${python3:Depends}
 Description: Keylime registrar and verifier
  ${Description}
  .
@@ -80,7 +81,8 @@ Architecture: all
 Depends: adduser,
          python3-keylime-lib,
          python3,
-         ${misc:Depends}
+         ${misc:Depends},
+         ${python3:Depends}
 Description: Keylime agent
  ${Description}
  .
