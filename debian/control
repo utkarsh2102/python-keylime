@@ -41,6 +41,7 @@ Description: Keylime - full local install
 Package: python3-keylime-lib
 Architecture: all
 Depends: libtss2-dev,
+         python3,
          python3-alembic,
          python3-cryptography,
          python3-gnupg,
@@ -64,6 +65,7 @@ Description: Keylime python library
 Package: python3-keylime-server
 Architecture: all
 Depends: python3-keylime-lib,
+         python3,
          ${misc:Depends}
 Description: Keylime registrar and verifier
  ${Description}
@@ -74,6 +76,7 @@ Description: Keylime registrar and verifier
 Package: python3-keylime-agent
 Architecture: all
 Depends: python3-keylime-lib,
+         python3,
          ${misc:Depends}
 Description: Keylime agent
  ${Description}
