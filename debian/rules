@@ -23,3 +23,10 @@ override_dh_installsystemd:
 	dh_installsystemd -p python3-keylime-server --name keylime_registrar
 	dh_installsystemd -p python3-keylime-server --name keylime_verifier
 	dh_installsystemd -p python3-keylime-agent --name var-lib-keylime-secure
+
+override_dh_gencontrol:
+	cat debian/vars.in >> debian/substvars
+	dh_gencontrol -- -Tdebian/substvars
+
+clean:
+	rm -f debian/substvars

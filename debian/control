@@ -30,7 +30,8 @@ Architecture: all
 Depends: python3-keylime-server,
          python3-keylime-agent,
          python3-keylime-agent-local,
-Description: ${Description}
+Description: Keylime - full local install
+ ${Description}
  .
  This package is meant for compatibility with former versions and will
  depend on python3-keylime-server and python3-keylime-agent as well as
@@ -55,7 +56,8 @@ Depends: libtss2-dev,
          tpm2-tools,
          ${misc:Depends},
          ${python3:Depends}
-Description: ${Description}
+Description: Keylime python library
+ ${Description}
  .
  These are the python libraries shared by server and agent components.
 
@@ -63,7 +65,8 @@ Package: python3-keylime-server
 Architecture: all
 Depends: python3-keylime-lib,
          ${misc:Depends}
-Description: ${Description}
+Description: Keylime registrar and verifier
+ ${Description}
  .
  These are the services "registrar" and "verifier" which make up a keylime
  management server.
@@ -72,7 +75,8 @@ Package: python3-keylime-agent
 Architecture: all
 Depends: python3-keylime-lib,
          ${misc:Depends}
-Description: ${Description}
+Description: Keylime agent
+ ${Description}
  .
  This is the keylime agent which is meant to run on all measured/monitored
  systems - it comes without a default configuration and will not start until
@@ -86,7 +90,8 @@ Package: python3-keylime-agent-local
 Architecture: all
 Depends: python3-keylime-agent,
          ${misc:Depends}
-Description: ${Description}
+Description: Keylime config for a local installation
+ ${Description}
  .
  This package contains a default config for running the agent against a local
  verifier/registrar which is useful for testing but not a common real scenario
