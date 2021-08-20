@@ -27,6 +27,18 @@ Homepage: https://keylime.dev
 
 Package: python3-keylime
 Architecture: all
+Depends: python3-keylime-server,
+         python3-keylime-agent,
+         python3-keylime-agent-local,
+Description: ${Description}
+ .
+ This package is meant for compatibility with former versions and will
+ depend on python3-keylime-server and python3-keylime-agent as well as
+ python3-keylime-agent-local bringing all services onto the local system
+ including a configuration to connect against the local services.
+
+Package: python3-keylime-lib
+Architecture: all
 Depends: libtss2-dev,
          python3-alembic,
          python3-cryptography,
@@ -43,24 +55,39 @@ Depends: libtss2-dev,
          tpm2-tools,
          ${misc:Depends},
          ${python3:Depends}
-Description: TPM-based key bootstrapping and system integrity measurement
- Keylime is an open source scalable trust system harnessing TPM Technology.
+Description: ${Description}
  .
- Keylime provides an end-to-end solution for bootstrapping hardware rooted
- cryptographic trust for remote machines, the provisioning of encrypted
- payloads and run-time system integrity monitoring. It also provides a
- flexible framework for the remote attestation of any given `PCR` (Platform
- Configuration Register). Users can create their own customized actions that
- will trigger when a machine fails its attested measurements.
+ These are the python libraries shared by server and agent components.
 
 Package: python3-keylime-server
 Architecture: all
-Depends: python3-keylime,
+Depends: python3-keylime-lib,
          ${misc:Depends}
-Description: Keylime server components.
+Description: ${Description}
+ .
+ These are the services "registrar" and "verifier" which make up a keylime
+ management server.
 
 Package: python3-keylime-agent
 Architecture: all
-Depends: python3-keylime,
+Depends: python3-keylime-lib,
          ${misc:Depends}
-Description: Keylime agent.
+Description: ${Description}
+ .
+ This is the keylime agent which is meant to run on all measured/monitored
+ systems - it comes without a default configuration and will not start until
+ one is provided.
+ .
+ Once you deploy /etc/keylime-agent.conf via any means the service will
+ start using that configuration. There is an /etc/keylime-agent.conf.example
+ provided to start with.
+
+Package: python3-keylime-agent-local
+Architecture: all
+Depends: python3-keylime-agent,
+         ${misc:Depends}
+Description: ${Description}
+ .
+ This package contains a default config for running the agent against a local
+ verifier/registrar which is useful for testing but not a common real scenario
+ for keylime.

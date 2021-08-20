@@ -6,6 +6,7 @@ StartLimitBurst=5
 # the device/machine is TPM-enabled.
 ConditionPathExistsGlob=/dev/tpm[0-9]*
 ConditionPathExistsGlob=/dev/tpmrm[0-9]*
+ConditionPathExistsGlob=/etc/keylime-agent.conf
 
 [Service]
 User=keylime

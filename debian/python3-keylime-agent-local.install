@@ -1,0 +1,2 @@
+#!/usr/bin/dh-exec
+etc/keylime.conf => /etc/keylime-agent.conf
