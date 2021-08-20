@@ -34,7 +34,7 @@ Depends: python3-keylime-server,
 Description: Keylime - full local install
  ${Description}
  .
- This package is meant for compatibility with former versions and will
+ This is a metapackage meant for compatibility with former versions and will
  depend on python3-keylime-server and python3-keylime-agent as well as
  python3-keylime-agent-local bringing all services onto the local system
  including a configuration to connect against the local services.
