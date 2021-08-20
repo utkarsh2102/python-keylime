@@ -65,7 +65,8 @@ Description: Keylime python library
 
 Package: python3-keylime-server
 Architecture: all
-Depends: python3-keylime-lib,
+Depends: adduser,
+         python3-keylime-lib,
          python3,
          ${misc:Depends}
 Description: Keylime registrar and verifier
@@ -76,7 +77,8 @@ Description: Keylime registrar and verifier
 
 Package: python3-keylime-agent
 Architecture: all
-Depends: python3-keylime-lib,
+Depends: adduser,
+         python3-keylime-lib,
          python3,
          ${misc:Depends}
 Description: Keylime agent
