@@ -30,6 +30,7 @@ Architecture: all
 Depends: python3-keylime-server,
          python3-keylime-agent,
          python3-keylime-agent-local,
+         ${misc:Depends}
 Description: Keylime - full local install
  ${Description}
  .
