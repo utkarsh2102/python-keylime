@@ -2,6 +2,7 @@
 Description=The Keylime compute agent
 StartLimitInterval=10s
 StartLimitBurst=5
+After=keylime_registrar.service
 # This condition is needed to ensure that
 # the device/machine is TPM-enabled.
 ConditionPathExistsGlob=/dev/tpm[0-9]*
