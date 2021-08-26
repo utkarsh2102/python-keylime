@@ -2,4 +2,4 @@
 usr/bin/keylime_agent usr/bin/
 
 
-etc/keylime.conf => /etc/keylime-agent.conf
+etc/keylime.conf => /etc/keylime-agent.conf.example

@@ -1,0 +1,9 @@
+[Unit]
+Description=Monitor changes in the config for agent
+
+[Path]
+PathExists=/etc/keylime-agent.conf
+Unit=keylime_agent.service
+
+[Install]
+WantedBy=multi-user.target

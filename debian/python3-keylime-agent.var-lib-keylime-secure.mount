@@ -1,5 +1,6 @@
 [Unit]
 Description=Keylime configuration filesystem
+Before=keylime_agent.service
 
 [Mount]
 What=tmpfs

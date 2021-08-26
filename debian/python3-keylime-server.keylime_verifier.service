@@ -1,8 +1,10 @@
 [Unit]
 After=network.target
+Before=keylime_registrar.service
 Description=The Keylime verifier
 StartLimitInterval=10s
 StartLimitBurst=5
+ConditionPathExistsGlob=/etc/keylime.conf
 
 [Service]
 Group=tss
@@ -14,3 +16,4 @@ RestartSec=120s
 
 [Install]
 WantedBy=multi-user.target
+RequiredBy=keylime_registrar.service
