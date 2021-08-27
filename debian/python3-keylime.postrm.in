@@ -9,7 +9,7 @@ KEYLIME_LOG_DIR=/var/log/keylime
 
 if [ "$1" = "purge" ]; then
   # umount /var/lib/keylime/secure if it's mounted.
-  if [ "${KEYLIME_PART}" = "agent" ]  && grep -qs '/var/lib/keylime/secure' /proc/mounts; then
+  if [ "${KEYLIME_PART}" = "agent" ]  && findmnt -nM '/var/lib/keylime/secure' 2>&1; then
     umount $KEYLIME_MOUNT
   fi
 
