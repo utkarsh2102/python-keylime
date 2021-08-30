@@ -30,14 +30,16 @@ Architecture: all
 Depends: python3-keylime-server,
          python3-keylime-agent,
          python3-keylime-agent-local,
+         python3-keylime-tenant,
          ${misc:Depends}
 Description: Keylime - full local install
  ${Description}
  .
- This is a metapackage meant for compatibility with former versions and will
- depend on python3-keylime-server and python3-keylime-agent as well as
- python3-keylime-agent-local bringing all services onto the local system
- including a configuration to connect against the local services.
+ This is a metapackage meant for compatibility with former versions
+ and will depend on python3-keylime-tenant, python3-keylime-server and
+ python3-keylime-agent as well as python3-keylime-agent-local bringing
+ all services onto the local system including a configuration to connect
+ against the local services.
 
 Package: python3-keylime-lib
 Architecture: all
@@ -70,6 +72,7 @@ Depends: adduser,
          python3,
          ${misc:Depends},
          ${python3:Depends}
+Recommends: python3-keylime-tenant
 Description: Keylime registrar and verifier
  ${Description}
  .
@@ -93,6 +96,18 @@ Description: Keylime agent
  Once you deploy /etc/keylime-agent.conf via any means the service will
  start using that configuration. There is an /etc/keylime-agent.conf.example
  provided to start with.
+
+Package: python3-keylime-tenant
+Architecture: all
+Depends: adduser,
+         python3-keylime-lib,
+         python3,
+         ${misc:Depends},
+         ${python3:Depends}
+Description: Keylime tenant tool
+ ${Description}
+ .
+ A tool for provisioning and to control keylime suite.
 
 Package: python3-keylime-agent-local
 Architecture: all
