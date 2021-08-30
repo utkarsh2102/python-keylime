@@ -10,4 +10,3 @@ usr/bin/keylime_userdata_encrypt
 usr/bin/keylime_webapp
 
 tpm_cert_store var/lib/keylime
-etc/keylime.conf
