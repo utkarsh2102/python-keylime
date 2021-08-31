@@ -9,10 +9,8 @@ export KEYLIME_CONFIG=$(CURDIR)/keylime.conf
 
 override_dh_install:
 	# The same file goes into multiple places
-	install -D -m 0644 keylime.conf debian/python3-keylime-server/etc/keylime.conf
-	install -D -m 0644 keylime.conf debian/python3-keylime-agent-local/etc/keylime-agent.conf
-	install -D -m 0644 keylime.conf debian/python3-keylime-agent/etc/keylime-agent.conf.example
-	install -D -m 0644 keylime.conf debian/python3-keylime-tenant/etc/keylime-tenant.conf
+	install -D -m 0644 keylime.conf debian/python3-keylime-defaultconf/etc/keylime.conf
+	install -D -m 0644 keylime.conf debian/python3-keylime-doc/usr/share/doc/keylime/keylime.conf.example
 	dh_install
 
 override_dh_installdeb:
