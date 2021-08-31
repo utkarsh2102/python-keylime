@@ -7,12 +7,12 @@ After=keylime_registrar.service
 # the device/machine is TPM-enabled.
 ConditionPathExistsGlob=/dev/tpm[0-9]*
 ConditionPathExistsGlob=/dev/tpmrm[0-9]*
-ConditionPathExistsGlob=/etc/keylime-agent.conf
+ConditionPathExistsGlob=/etc/keylime.conf
 
 [Service]
 User=keylime
 Group=tss
-Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0 KEYLIME_CONFIG=/etc/keylime-agent.conf
+Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0 KEYLIME_CONFIG=/etc/keylime.conf
 ExecStartPre=-+chown -hHR keylime:tss /sys/kernel/security/tpm0
 ExecStartPre=-+chown -hHR keylime:tss /sys/kernel/security/ima
 ExecStart=/usr/bin/keylime_agent
