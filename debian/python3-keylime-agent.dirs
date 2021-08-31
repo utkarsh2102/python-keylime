@@ -1,2 +1,2 @@
-var/lib/keylime/secure
 var/lib/keylime
+var/lib/keylime/secure

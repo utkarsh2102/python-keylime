@@ -1,4 +1,4 @@
-usr/bin/keylime_verifier
+tpm_cert_store var/lib/keylime
 usr/bin/keylime_ca
 usr/bin/keylime_ima_emulator
 usr/bin/keylime_migrations_apply
@@ -7,6 +7,5 @@ usr/bin/keylime_provider_registrar
 usr/bin/keylime_provider_vtpm_add
 usr/bin/keylime_registrar
 usr/bin/keylime_userdata_encrypt
+usr/bin/keylime_verifier
 usr/bin/keylime_webapp
-
-tpm_cert_store var/lib/keylime
