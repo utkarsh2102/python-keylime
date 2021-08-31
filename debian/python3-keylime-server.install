@@ -1,4 +1,3 @@
-tpm_cert_store var/lib/keylime
 usr/bin/keylime_ca
 usr/bin/keylime_ima_emulator
 usr/bin/keylime_migrations_apply

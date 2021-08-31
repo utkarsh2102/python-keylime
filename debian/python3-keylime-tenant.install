@@ -1,1 +1,2 @@
+tpm_cert_store var/lib/keylime
 usr/bin/keylime_tenant
