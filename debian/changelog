@@ -1,13 +1,58 @@
 keylime (6.1.1-1~ibmcloud0.1) bionic; urgency=medium
 
+  [ Utkarsh Gupta ]
   * New upstream version 6.1.1.
   * Revert "Don't run keylime_agent as non-root for now".
     - Upstream has implemented this via #666 so it doesn't
       need to be root anymore.
   * d/p/embed-dataclasses-module.patch: Add patch to embed
     dataclasses module in the package.
+  * d/python3-keylime.postrm.in: Use findmnt over grep.
 
- -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Thu, 22 Jul 2021 23:39:24 +0530
+  [ Miriam Espana Acebal ]
+  * Added needed user and group for Options.
+  * Ensure mount point is enabled before agent.
+  * Adding dependencies between services.
+  * Ensuring config exists before launching server service.
+  * Starting the agent service when agent-conf file is
+    present, because at installation is a .conf.example file.
+  * d/control, d/python3-keylime-server.install,
+    d/python3-keylime-tenant.install: split tenant.
+
+  [ Thore Sommer ]
+  * Import patched dataclasses only when needed.
+  * Run registrar and verifier as keylime user.
+  * Removed TPM2TOOLS_TCTI environment variable from
+    registrar and verifier service.
+  * Make install path in python3-keylime.install relative.
+  * Make IMA log and UEFI event log readable for the keylime user.
+  * Seperating the agent from the server components.
+  * Add postinst and postrm for agent and server.
+  * Use separate configuration for agent.
+  * keylime_agent.service: use KillSignal=SIGINT.
+
+  [ Christian Ehrhardt ]
+  * d/*: default split service configuration.
+  * d/rules: fix install of local config file.
+  * d/rules, d/control: fix usage of substvars.
+  * d/control: satisfy lintian python-script-but-no-python-dep.
+  * d/python3-keylime{-lib}.install: fix content of python3-keylime-lib.
+  * d/control: lintian debhelper-but-no-misc-depends.
+  * d/control: lintian maintainer-script-needs-depends-on-adduser.
+  * d/python3-keylime.postinst.in: lintian recursive-privilege-change.
+  * d/control: python pkgs should declare ${python3:Depends}.
+  * d/control: lintian empty-binary-package.
+  * d/rules: add tenant and deploy all conf files in the same way.
+  * d/control, d/python3-keylime-agent.keylime_agent.{path,service},
+    d/python3-keylime-lib.install,d/rules: re-unify config files.
+  * d/python3-keylime-agent.install: target path is not needed.
+  * d/*: apply wrap-and-sort -at.
+  * d/python3-keylime-agent.install: .install files should not be
+    executable if not using dh-exec.
+  * d/python3-keylime-{server,tenant}.install: The TPM certificate
+    store is needed by the tenant.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Wed, 01 Sep 2021 11:11:11 +0530
 
 keylime (6.1.0-1~ibmcloud0.2) bionic; urgency=medium
 
