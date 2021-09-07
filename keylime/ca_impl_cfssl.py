@@ -34,7 +34,7 @@ def post_cfssl(params, data):
     while True:
         try:
             response = requests.post(
-                "http://%s:%s/%s" % (cfssl_ip, cfssl_port, params), json=data, timeout=1)
+                f"http://{cfssl_ip}:{cfssl_port}/{params}", json=data, timeout=1)
             break
         except requests.exceptions.ConnectionError as e:
             numtries += 1
@@ -149,7 +149,7 @@ def mk_signed_cert(cacert, ca_pk, name, serialnum):
     # check CRL distribution point
     disturl = config.get('ca', 'cert_crl_dist')
     if disturl == 'default':
-        disturl = "http://%s:%s/crl.der" % (socket.getfqdn(), config.CRL_PORT)
+        disturl = f"http://{socket.getfqdn()}:{config.CRL_PORT}/crl.der"
 
     # set up config for cfssl server
     cfsslconfig = {
@@ -166,7 +166,7 @@ def mk_signed_cert(cacert, ca_pk, name, serialnum):
         # need to temporarily write out the private key with no password
         # to tmpfs
         ca_pk.save_key('%s/ca-key.pem' % secdir, None)
-        with open('%s/cfsslconfig.yml' % secdir, 'w') as f:
+        with open(os.path.join(secdir, 'cfsslconfig.yml'), 'w', encoding="utf-8") as f:
             json.dump(cfsslconfig, f)
 
         cmdline = "-config=%s/cfsslconfig.yml" % secdir
@@ -201,7 +201,7 @@ def gencrl(serials, cert, ca_pk):
         # need to temporarily write out the private key with no password
         # to tmpfs
         priv_key = os.path.abspath("%s/ca-key.pem" % secdir)
-        with open(priv_key, 'w') as f:
+        with open(priv_key, 'w', encoding="utf-8") as f:
             f.write(ca_pk)
         cmdline = " -ca-key %s -ca cacert.crt" % (priv_key)
 
@@ -216,8 +216,8 @@ def gencrl(serials, cert, ca_pk):
     if body['success']:
         retval = base64.b64decode(body['result'])
     else:
-        raise Exception("Unable to create crl for cert serials %s.  Error: %s" % (
-            serials, body['errors']))
+        raise Exception(f"Unable to create crl for cert serials {serials}. "
+                        f"Error: {body['errors']}")
     return retval
     # ./cfssl gencrl revoke ca.pem ca-key.pem | base64 -D > mycrl.der
 

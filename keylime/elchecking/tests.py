@@ -33,11 +33,10 @@ class Test(metaclass=abc.ABCMeta):
         """
         raise NotImplementedError
 
-
-# type_test constructs a test of data type that is expected to pass
+# type_test constructs a test of data type that is expected to pass.
+# This and the following are used to check reference state for bugs.
 def type_test(t) -> typing.Callable[[typing.Any], bool]:
     """Returns a lambda that tests against the given type.
-
     The lambda returns True on pass, raises Exception on fail."""
     def test(v: typing.Any) -> bool:
         if isinstance(v, t):
@@ -162,7 +161,7 @@ class Dispatcher(Test):
             raise Exception('Dispatcher given empty list of key names')
         list(map(type_test(str), key_names))
         self.key_names = key_names
-        self.tests = dict()
+        self.tests = {}
 
     def set(self, key_vals: typing.Tuple[str, ...], test: Test) -> None:
         """Set the test for the given value tuple"""
@@ -327,7 +326,7 @@ class DelayToFields(Test):
 
     def why_not(self, globs: Globals, subject: Data) -> str:
         """Test the stashed field values"""
-        delayed = dict()
+        delayed = {}
         for field_name in self.field_names:
             delayed[field_name] = globs.get(field_name, None)
         return self.fields_test.why_not(globs, delayed)
@@ -390,7 +389,7 @@ class DigestsTest(Test):
     def __init__(self, good_digests_list: typing.Iterable[Digest]):
         """good_digests_list is a list of good {alg:hash}"""
         super().__init__()
-        self.good_digests = dict()
+        self.good_digests = {}
         'map from alg to set of good digests'
         for good_digests in good_digests_list:
             type_test(dict)(good_digests)

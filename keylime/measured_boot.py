@@ -19,7 +19,7 @@ def read_mb_refstate(mb_path=None):
 
     mb_data = None
     # Purposefully die if path doesn't exist
-    with open(mb_path, 'r') as f:
+    with open(mb_path, encoding="utf-8") as f:
         mb_data = json.load(f)
 
     logger.debug("Loaded measured boot reference state from %s", mb_path)
@@ -29,7 +29,9 @@ def read_mb_refstate(mb_path=None):
 def get_policy(mb_refstate_str):
     """ Convert the mb_refstate_str to JSON and get the measured boot policy.
     :param mb_refstate_str: String representation of measured boot reference state
-    :returns: Returns the JSON object of the measured boot reference state and the measured boot policy;
+    :returns: Returns
+                  * the measured boot policy object
+                  * the JSON object of the measured boot reference state
               both can be None if mb_refstate_str was empty
     """
 
@@ -57,7 +59,7 @@ def get_policy(mb_refstate_str):
     else:
         mb_policy = None
 
-    return mb_refstate_data, mb_policy
+    return mb_policy, mb_refstate_data
 
 def evaluate_policy(mb_policy, mb_refstate_data, mb_measurement_data, pcrsInQuote, pcrPrefix, agent_id):
     missing = list(set(config.MEASUREDBOOT_PCRS).difference(pcrsInQuote))
@@ -67,9 +69,7 @@ def evaluate_policy(mb_policy, mb_refstate_data, mb_measurement_data, pcrsInQuot
     try:
         reason = mb_policy.evaluate(mb_refstate_data, mb_measurement_data)
     except Exception as exn:
-        logger.error("Boot attestation for agent %s, configured policy %s, refstate=%s, raised Exception %s",
-            agent_id, config.MEASUREDBOOT_POLICYNAME, json.dumps(mb_refstate_data), str(exn))
-        reason = ''
+        reason= "policy evaluation failed: %s"%(str(exn))
     if reason:
         logger.error("Boot attestation failed for agent %s, configured policy %s, refstate=%s, reason=%s",
             agent_id, config.MEASUREDBOOT_POLICYNAME, json.dumps(mb_refstate_data), reason)
