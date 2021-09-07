@@ -21,6 +21,7 @@ import requests
 
 from cryptography.hazmat.primitives import serialization as crypto_serialization
 
+from keylime.agentstates import AgentAttestState
 from keylime.requests_client import RequestsClient
 from keylime.common import states
 from keylime import config
@@ -37,6 +38,7 @@ from keylime.common import algorithms
 from keylime import ima_file_signatures
 from keylime import measured_boot
 from keylime import gpg
+from keylime import api_version as keylime_api_version
 
 # setup logging
 logger = keylime_logging.init_logging('tenant')
@@ -63,6 +65,8 @@ class Tenant():
 
     webapp_ip = None
     webapp_port = None
+
+    api_version = None
 
     uuid_service_generate_locally = None
     agent_uuid = None
@@ -103,6 +107,8 @@ class Tenant():
             self.webapp_port += 2000
         self.webapp_ip = config.get('webapp', 'webapp_ip')
 
+        self.api_version = keylime_api_version.current_version()
+
         self.my_cert, self.my_priv_key = self.get_tls_context()
         self.cert = (self.my_cert, self.my_priv_key)
         if config.getboolean('general', "enable_tls"):
@@ -133,11 +139,11 @@ class Tenant():
             tls_dir = 'cv_ca'
 
         if tls_dir[0] != '/':
-            tls_dir = os.path.abspath('%s/%s' % (config.WORK_DIR, tls_dir))
+            tls_dir = os.path.abspath(os.path.join(config.WORK_DIR, tls_dir))
 
         logger.info("Setting up client TLS in %s", tls_dir)
-        my_cert = "%s/%s" % (tls_dir, my_cert)
-        my_priv_key = "%s/%s" % (tls_dir, my_priv_key)
+        my_cert = os.path.join(tls_dir, my_cert)
+        my_priv_key = os.path.join(tls_dir, my_priv_key)
 
         return my_cert, my_priv_key
 
@@ -322,7 +328,7 @@ class Tenant():
                 else:
                     raise UserError("Invalid key file provided")
             else:
-                f = open(args["keyfile"], 'r')
+                f = open(args["keyfile"], encoding="utf-8")
             self.K = base64.b64decode(f.readline())
             self.U = base64.b64decode(f.readline())
             self.V = base64.b64decode(f.readline())
@@ -334,7 +340,7 @@ class Tenant():
                     self.payload = args["payload"]["data"][0]
             else:
                 if args["payload"] is not None:
-                    f = open(args["payload"], 'r')
+                    f = open(args["payload"], 'rb')
                     self.payload = f.read()
                     f.close()
 
@@ -351,7 +357,7 @@ class Tenant():
                 else:
                     raise UserError("Invalid file payload provided")
             else:
-                with open(args["file"], 'r') as f:
+                with open(args["file"], encoding="utf-8") as f:
                     contents = f.read()
             ret = user_data_encrypt.encrypt(contents)
             self.K = ret['k']
@@ -375,7 +381,9 @@ class Tenant():
             if not os.path.exists(args["ca_dir"]) or not os.path.exists("%s/cacert.crt" % args["ca_dir"]):
                 logger.warning("CA directory does not exist. Creating...")
                 ca_util.cmd_init(args["ca_dir"])
-            if not os.path.exists("%s/%s-private.pem" % (args["ca_dir"], self.agent_uuid)):
+            if not os.path.exists(
+                    os.path.join(args["ca_dir"],
+                                 f"{self.agent_uuid}-private.pem")):
                 ca_util.cmd_mkcert(args["ca_dir"], self.agent_uuid)
 
             cert_pkg, serial, subject = ca_util.cmd_certpkg(
@@ -411,7 +419,8 @@ class Tenant():
                         if os.path.exists(args["incl_dir"]):
                             files = next(os.walk(args["incl_dir"]))[2]
                             for filename in files:
-                                with open("%s/%s" % (args["incl_dir"], filename), 'rb') as f:
+                                with open(os.path.join(args["incl_dir"],
+                                                       filename), 'rb') as f:
                                     zf.writestr(
                                         os.path.basename(f.name), f.read())
                         else:
@@ -498,7 +507,7 @@ class Tenant():
             logger.warning("AIK not found in registrar, quote not validated")
             return False
 
-        if not self.tpm_instance.check_quote(self.agent_uuid, self.nonce, public_key, quote, reg_data['aik_tpm'], hash_alg=hash_alg):
+        if not self.tpm_instance.check_quote(AgentAttestState(self.agent_uuid), self.nonce, public_key, quote, reg_data['aik_tpm'], hash_alg=hash_alg):
             if reg_data['regcount'] > 1:
                 logger.error("WARNING: This UUID had more than one ek-ekcert registered to it! This might indicate that your system is misconfigured or a malicious host is present. Run 'regdelete' for this agent and restart")
                 sys.exit()
@@ -525,7 +534,7 @@ class Tenant():
             return True
 
         if script[0] != '/':
-            script = "%s/%s" % (config.WORK_DIR, script)
+            script = os.path.join(config.WORK_DIR, script)
 
         logger.info("Checking EK with script %s", script)
         # now we need to exec the script with the ek and ek cert in vars
@@ -581,7 +590,7 @@ class Tenant():
         json_message = json.dumps(data)
         do_cv = RequestsClient(self.verifier_base_url, self.tls_enabled)
         response = do_cv.post(
-            (f'/agents/{self.agent_uuid}'),
+            (f'/v{self.api_version}/agents/{self.agent_uuid}'),
             data=json_message,
             cert=self.cert,
             verify=False
@@ -619,7 +628,7 @@ class Tenant():
         if listing and (self.verifier_id is not None):
             verifier_id = self.verifier_id
             response = do_cvstatus.get(
-                (f'/agents/?verifier={verifier_id}'),
+                (f'/v{self.api_version}/agents/?verifier={verifier_id}'),
                 cert=self.cert,
                 verify=False
             )
@@ -628,13 +637,13 @@ class Tenant():
             if self.verifier_id is not None:
                 verifier_id = self.verifier_id
             response = do_cvstatus.get(
-                (f'/agents/?bulk={bulk}&verifier={verifier_id}'),
+                (f'/v{self.api_version}/agents/?bulk={bulk}&verifier={verifier_id}'),
                 cert=self.cert,
                 verify=False
             )
         else:
             response = do_cvstatus.get(
-                (f'/agents/{agent_uuid}'),
+                (f'/v{self.api_version}/agents/{agent_uuid}'),
                 cert=self.cert,
                 verify=False
             )
@@ -672,9 +681,8 @@ class Tenant():
 
         return None
 
-    def do_cvdelete(self, verifier_check):
-        """Delete agent from Verifier
-        """
+    def do_cvdelete(self, verifier_check=True):
+        """Delete agent from Verifier."""
         if verifier_check:
             agent_json = self.do_cvstatus(listing=False, returnresponse=True)
             self.verifier_ip = agent_json["verifier_ip"]
@@ -682,7 +690,7 @@ class Tenant():
 
         do_cvdelete = RequestsClient(self.verifier_base_url, self.tls_enabled)
         response = do_cvdelete.delete(
-            (f'/agents/{self.agent_uuid}'),
+            (f'/v{self.api_version}/agents/{self.agent_uuid}'),
             cert=self.cert,
             verify=False
         )
@@ -700,7 +708,7 @@ class Tenant():
                 get_cvdelete = RequestsClient(
                     self.verifier_base_url, self.tls_enabled)
                 response = get_cvdelete.get(
-                    (f'/agents/{self.agent_uuid}'),
+                    (f'/v{self.api_version}/agents/{self.agent_uuid}'),
                     cert=self.cert,
                     verify=False
                 )
@@ -736,9 +744,8 @@ class Tenant():
         registrar_client.doRegistrarDelete(
             self.registrar_ip, self.registrar_port, self.agent_uuid)
 
-    def do_cvreactivate(self, verifier_check):
-        """ Reactive Agent
-        """
+    def do_cvreactivate(self, verifier_check=True):
+        """Reactive Agent."""
         if verifier_check:
             agent_json = self.do_cvstatus(listing=False, returnresponse=True)
             self.verifier_ip = agent_json['verifier_ip']
@@ -747,7 +754,7 @@ class Tenant():
         do_cvreactivate = RequestsClient(
             self.verifier_base_url, self.tls_enabled)
         response = do_cvreactivate.put(
-            (f'/agents/{self.agent_uuid}/reactivate'),
+            f'/v{self.api_version}/agents/{self.agent_uuid}/reactivate',
             data=b'',
             cert=self.cert,
             verify=False
@@ -772,7 +779,7 @@ class Tenant():
     def do_cvstop(self):
         """ Stop declared active agent
         """
-        params = f'/agents/{self.agent_uuid}/stop'
+        params = f'/v{self.api_version}/agents/{self.agent_uuid}/stop'
         do_cvstop = RequestsClient(self.verifier_base_url, self.tls_enabled)
         response = do_cvstop.put(
             params,
@@ -808,7 +815,7 @@ class Tenant():
         # Note: We need a specific retry handler (perhaps in common), no point having localised unless we have too.
         while True:
             try:
-                params = '/quotes/identity?nonce=%s' % (self.nonce)
+                params = f'/v{self.api_version}/quotes/identity?nonce=%s' % (self.nonce)
                 cloudagent_base_url = f'{self.agent_ip}:{self.agent_port}'
                 do_quote = RequestsClient(cloudagent_base_url, tls_enabled=False)
                 response = do_quote.get(
@@ -892,7 +899,7 @@ class Tenant():
             u_json_message = json.dumps(data)
 
             # post encrypted U back to CloudAgent
-            params = '/keys/ukey'
+            params = f'/v{self.api_version}/keys/ukey'
             cloudagent_base_url = (
                 f'{self.agent_ip}:{self.agent_port}'
             )
@@ -932,7 +939,7 @@ class Tenant():
                 do_verify = RequestsClient(
                     cloudagent_base_url, tls_enabled=False)
                 response = do_verify.get(
-                    (f'/keys/verify?challenge={challenge}'),
+                    (f'/v{self.api_version}/keys/verify?challenge={challenge}'),
                     cert=self.cert,
                     verify=False
                 )
@@ -985,19 +992,19 @@ class Tenant():
         }
         body = json.dumps(data)
         cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
-        response = cv_client.post(f'/allowlists/{allowlist_name}', data=body,
+        response = cv_client.post(f'/v{self.api_version}/allowlists/{allowlist_name}', data=body,
                                   cert=self.cert, verify=False)
         print(response.json())
 
     def do_delete_allowlist(self, name):
         cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
-        response = cv_client.delete(f'/allowlists/{name}',
+        response = cv_client.delete(f'/v{self.api_version}/allowlists/{name}',
                                     cert=self.cert, verify=False)
         print(response.json())
 
     def do_show_allowlist(self, name):
         cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
-        response = cv_client.get(f'/allowlists/{name}',
+        response = cv_client.get(f'/v{self.api_version}/allowlists/{name}',
                                  cert=self.cert, verify=False)
         print(f"Show allowlist command response: {response.status_code}.")
         print(response.json())
@@ -1119,8 +1126,8 @@ def main(argv=sys.argv):
             mytenant.agent_uuid = hashlib.sha256(
                 mytenant.agent_uuid).hexdigest()
     else:
-        logger.warning("Using default UUID D432FBB3-D2F1-4A97-9EF7-75BD81C00000")
-        mytenant.agent_uuid = "D432FBB3-D2F1-4A97-9EF7-75BD81C00000"
+        logger.warning("Using default UUID d432fbb3-d2f1-4a97-9ef7-75bd81c00000")
+        mytenant.agent_uuid = "d432fbb3-d2f1-4a97-9ef7-75bd81c00000"
 
     if config.STUB_VTPM and config.TPM_CANNED_VALUES is not None:
         # Use canned values for agent UUID
@@ -1155,7 +1162,7 @@ def main(argv=sys.argv):
                 args.allowlist = write_to_namedtempfile(response.content, delete_tmp_files)
                 logger.debug("Allowlist temporarily saved in %s" % args.allowlist)
             else:
-                raise Exception("Downloading allowlist (%s) failed with status code %s!" % (args.allowlist_url, response.status_code))
+                raise Exception(f"Downloading allowlist ({args.allowlist_url}) failed with status code {response.status_code}!")
 
         if args.allowlist_sig_url:
             logger.info("Downloading Allowlist signature from %s", args.allowlist_sig_url)
@@ -1164,7 +1171,7 @@ def main(argv=sys.argv):
                 args.allowlist_sig = write_to_namedtempfile(response.content, delete_tmp_files)
                 logger.debug("Allowlist signature temporarily saved in %s", args.allowlist_sig)
             else:
-                raise Exception("Downloading allowlist signature (%s) failed with status code %s!" % (args.allowlist_sig_url, response.status_code))
+                raise Exception(f"Downloading allowlist signature ({args.allowlist_sig_url}) failed with status code {response.status_code}!")
 
         # verify all the local keys for which we have a signature file and a key to verify
         for i, key_file in enumerate(args.ima_sign_verification_keys):
@@ -1190,7 +1197,7 @@ def main(argv=sys.argv):
                 args.ima_sign_verification_keys.append(key_file)
                 logger.debug("Key temporarily saved in %s" % key_file)
             else:
-                raise Exception("Downloading key (%s) failed with status code %s!" % (key_url, response.status_code))
+                raise Exception(f"Downloading key ({key_url}) failed with status code {response.status_code}!")
 
             if len(args.ima_sign_verification_key_sig_urls) <= i:
                 continue
@@ -1206,7 +1213,7 @@ def main(argv=sys.argv):
                 keysig_file = write_to_namedtempfile(response.content, delete_tmp_files)
                 logger.debug("Key signature temporarily saved in %s" % keysig_file)
             else:
-                raise Exception("Downloading key signature (%s) failed with status code %s!" % (key_url, response.status_code))
+                raise Exception(f"Downloading key signature ({key_url}) failed with status code {response.status_code}!")
 
             gpg_key_file = args.ima_sign_verification_key_sig_url_keys[i]
             gpg.gpg_verify_filesignature(gpg_key_file, key_file, keysig_file, "IMA file signing key")

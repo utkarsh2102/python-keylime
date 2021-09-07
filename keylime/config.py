@@ -21,6 +21,8 @@ except ImportError:
 
 import simplejson as json
 
+from keylime import api_version as keylime_api_version
+
 
 def convert(data):
     if isinstance(data, bytes):
@@ -46,10 +48,6 @@ def environ_bool(env_name, default):
         "Environment variable %s set to invalid value "
         "%s (use either on/true/1 or off/false/0)" %
         (env_name, val))
-
-
-# Current Keylime API version
-API_VERSION = '2'
 
 
 # SET STUB_TPM TO True TO ALLOW ALL TPM Operations to be stubbed out
@@ -136,9 +134,10 @@ if not os.path.exists(CONFIG_FILE):
         WARN = True
 
 if not os.path.exists(CONFIG_FILE):
-    raise Exception('%s does not exist. Please set environment variable KEYLIME_CONFIG or see %s for more details' % (
-        CONFIG_FILE, __file__))
-print(("Using config file %s" % (CONFIG_FILE,)))
+    raise Exception(f"{CONFIG_FILE} does not exist. Please set environment"
+                    f"variable KEYLIME_CONFIG or see {__file__} for more"
+                    f"details")
+print(f"Using config file {CONFIG_FILE}")
 if WARN:
     print("WARNING: Keylime is using the config file from its installation location. \n\tWe recommend you copy keylime.conf to /etc/ to customize it.")
 
@@ -190,18 +189,6 @@ else:
 WORK_DIR = os.getenv('KEYLIME_DIR', DEFAULT_WORK_DIR)
 
 CA_WORK_DIR = '%s/ca/' % WORK_DIR
-
-
-def list_convert(data):
-    if isinstance(data, bytes):
-        return data.decode()
-    if isinstance(data, dict):
-        return dict(map(convert, data.items()))
-    if isinstance(data, tuple):
-        return tuple(map(convert, data))
-    if isinstance(data, list):
-        return list(map(convert, data))
-    return data
 
 
 def chownroot(path, logger):
@@ -271,13 +258,15 @@ def get_restful_params(urlstring):
     query_params = urllib.parse.parse_qsl(parsed_path.query)
     path_tokens = parsed_path.path.split('/')
 
-    # If first token is API version, ensure it isn't obsolete
-    api_version = API_VERSION
-    if len(path_tokens[0]) == 2 and path_tokens[0][0] == 'v':
-        # Require latest API version
-        if path_tokens[0][1] != API_VERSION:
-            return None
-        api_version = path_tokens.pop(0)
+    # If first token looks like an API version, validate it and make sure it's supported
+    api_version = 0
+    if path_tokens[0] and len(path_tokens[0]) >= 0 and re.match(r"^v?[0-9]+(\.[0-9]+)?", path_tokens[0]):
+        version = keylime_api_version.normalize_version(path_tokens[0])
+
+        if keylime_api_version.is_supported_version(version):
+            api_version = version
+
+        path_tokens.pop(0)
 
     path_params = list_to_dict(path_tokens)
     path_params["api_version"] = api_version

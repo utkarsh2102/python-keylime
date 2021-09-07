@@ -14,7 +14,7 @@ logger = keylime_logging.init_logging('secure_mount')
 
 def check_mounted(secdir):
     whatsmounted = cmd_exec.run("mount")['retout']
-    whatsmounted_converted = config.list_convert(whatsmounted)
+    whatsmounted_converted = config.convert(whatsmounted)
     for line in whatsmounted_converted:
         tokens = line.split()
         tmpfs = False
@@ -24,10 +24,13 @@ def check_mounted(secdir):
             tmpfs = True
         if tokens[2] == secdir:
             if not tmpfs:
-                logger.error("secure storage location %s already mounted on wrong file system type: %s.  Unmount to continue." % (
-                    secdir, tokens[0]))
-                raise Exception("secure storage location %s already mounted on wrong file system type: %s.  Unmount to continue." % (
-                    secdir, tokens[0]))
+                logger.error("secure storage location %s already mounted "
+                             "on wrong file system type: %s.  Unmount to"
+                             "continue.", secdir, tokens[0])
+                raise Exception(
+                    f"secure storage location {secdir} already mounted on "
+                    f"wrong file system type: {tokens[0]}.  Unmount to "
+                    f"continue.")
 
             logger.debug(
                 "secure storage location %s already mounted on tmpfs" % secdir)
