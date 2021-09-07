@@ -23,19 +23,25 @@ import io
 import importlib
 import shutil
 import subprocess
+import psutil
 
 import simplejson as json
+
+from cryptography.hazmat.primitives import serialization
 
 from keylime import config
 from keylime import keylime_logging
 from keylime import cmd_exec
 from keylime import crypto
+from keylime import ima
 from keylime import openstack
 from keylime import revocation_notifier
 from keylime import registrar_client
 from keylime import secure_mount
+from keylime import api_version as keylime_api_version
 from keylime.tpm.tpm_main import tpm
 from keylime.tpm.tpm_abstract import TPM_Utilities
+from keylime.tpm.tpm2_objects import pubkey_from_tpm2b_public
 
 # Configure logger
 logger = keylime_logging.init_logging('cloudagent')
@@ -68,6 +74,10 @@ class Handler(BaseHTTPRequestHandler):
                 self, 405, "Not Implemented: Use /keys/ or /quotes/ interfaces")
             return
 
+        if not rest_params["api_version"]:
+            config.echo_json_response(self, 400, "API Version not supported")
+            return
+
         if "keys" in rest_params and rest_params['keys'] == 'verify':
             if self.server.K is None:
                 logger.info('GET key challenge returning 400 response. bootstrap key not available')
@@ -91,8 +101,9 @@ class Handler(BaseHTTPRequestHandler):
 
         elif "quotes" in rest_params:
             nonce = rest_params['nonce']
-            pcrmask = rest_params['mask'] if 'mask' in rest_params else None
-            vpcrmask = rest_params['vmask'] if 'vmask' in rest_params else None
+            pcrmask = rest_params.get('mask', None)
+            vpcrmask = rest_params.get('vmask', None)
+            ima_ml_entry = rest_params.get('ima_ml_entry', '0')
 
             # if the query is not messed up
             if nonce is None:
@@ -102,7 +113,10 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             # Sanitization assurance (for tpm.run() tasks below)
-            if not (nonce.isalnum() and (pcrmask is None or pcrmask.isalnum()) and (vpcrmask is None or vpcrmask.isalnum())):
+            if not (nonce.isalnum() and
+                    (pcrmask is None or pcrmask.isalnum()) and
+                    (vpcrmask is None or vpcrmask.isalnum() and
+                    ima_ml_entry.isalnum())):
                 logger.warning('GET quote returning 400 response. parameters should be strictly alphanumeric')
                 config.echo_json_response(
                     self, 400, "parameters should be strictly alphanumeric")
@@ -135,14 +149,18 @@ class Handler(BaseHTTPRequestHandler):
                     'pubkey': self.server.rsapublickey_exportable,
                 }
 
+            response['boottime'] = self.server.boottime
+
             # return a measurement list if available
             if TPM_Utilities.check_mask(imaMask, config.IMA_PCR):
-                if not os.path.exists(config.IMA_ML):
-                    logger.warning("IMA measurement list not available: %s", config.IMA_ML)
-                else:
-                    with open(config.IMA_ML, 'r') as f:
-                        ml = f.read()
+                ima_ml_entry = int(ima_ml_entry)
+                if ima_ml_entry > self.server.next_ima_ml_entry:
+                    ima_ml_entry = 0
+                ml, nth_entry, num_entries = ima.read_measurement_list(config.IMA_ML, ima_ml_entry)
+                if num_entries > 0:
                     response['ima_measurement_list'] = ml
+                    response['ima_measurement_list_entry'] = nth_entry
+                    self.server.next_ima_ml_entry = num_entries
 
             # similar to how IMA log retrievals are triggered by IMA_PCR, we trigger boot logs with MEASUREDBOOT_PCRs
             # other possibilities would include adding additional data to rest_params to trigger boot log retrievals
@@ -176,6 +194,10 @@ class Handler(BaseHTTPRequestHandler):
         if rest_params is None:
             config.echo_json_response(
                 self, 405, "Not Implemented: Use /keys/ interface")
+            return
+
+        if not rest_params["api_version"]:
+            config.echo_json_response(self, 400, "API Version not supported")
             return
 
         content_length = int(self.headers.get('Content-Length', 0))
@@ -221,7 +243,7 @@ class Handler(BaseHTTPRequestHandler):
             shutil.rmtree("%s/unzipped" % secdir)
 
         # write out key file
-        f = open(secdir + "/" + self.server.enc_keyname, 'w')
+        f = open(secdir + "/" + self.server.enc_keyname, 'w', encoding="utf-8")
         f.write(base64.b64encode(self.server.K).decode())
         f.close()
 
@@ -232,9 +254,9 @@ class Handler(BaseHTTPRequestHandler):
         tomeasure = self.server.K
 
         # if we have a good key, now attempt to write out the encrypted payload
-        dec_path = "%s/%s" % (secdir,
-                              config.get('cloud_agent', "dec_payload_file"))
-        enc_path = "%s/encrypted_payload" % config.WORK_DIR
+        dec_path = os.path.join(secdir,
+                                config.get('cloud_agent', "dec_payload_file"))
+        enc_path = os.path.join(config.WORK_DIR, "encrypted_payload")
 
         dec_payload = None
         enc_payload = None
@@ -288,7 +310,8 @@ class Handler(BaseHTTPRequestHandler):
                         # should be a no-op as poll already told us it's done
                         proc.wait()
 
-                    if not os.path.exists("%s/unzipped/%s" % (secdir, initscript)):
+                    if not os.path.exists(
+                            os.path.join(secdir, "unzipped", initscript)):
                         logger.info("No payload script %s found in %s/unzipped", initscript, secdir)
                     else:
                         logger.info("Executing payload script: %s/unzipped/%s", secdir, initscript)
@@ -323,8 +346,8 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
     """Http Server which will handle each request in a separate thread."""
 
     # Do not modify directly unless you acquire uvLock. Set chosen for uniqueness of contained values
-    u_set = set([])
-    v_set = set([])
+    u_set = set()
+    v_set = set()
 
     rsaprivatekey = None
     rsapublickey = None
@@ -336,11 +359,14 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
     K = None
     final_U = None
     agent_uuid = None
+    next_ima_ml_entry = 0 # The next IMA log offset the verifier may ask for.
+    boottime = int(psutil.boot_time())
 
     def __init__(self, server_address, RequestHandlerClass, agent_uuid):
         """Constructor overridden to provide ability to pass configuration arguments to the server"""
         secdir = secure_mount.mount()
-        keyname = "%s/%s" % (secdir, config.get('cloud_agent', 'rsa_keyname'))
+        keyname = os.path.join(secdir,
+                               config.get('cloud_agent', 'rsa_keyname'))
         # read or generate the key depending on configuration
         if os.path.isfile(keyname):
             # read in private key
@@ -403,8 +429,8 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
                     return_value = self.decrypt_check(u, v)
                     if return_value:
                         # reset u and v sets
-                        self.u_set = set([])
-                        self.v_set = set([])
+                        self.u_set = set()
+                        self.v_set = set()
                         return return_value
             # TODO check on whether this happens or not.  NVRAM causes trouble
             if both_u_and_v_present:
@@ -504,7 +530,10 @@ def main():
     if agent_uuid == 'openstack':
         agent_uuid = openstack.get_openstack_uuid()
     elif agent_uuid == 'hash_ek':
-        agent_uuid = hashlib.sha256(ek_tpm).hexdigest()
+        ek_pubkey = pubkey_from_tpm2b_public(base64.b64decode(ek_tpm))
+        ek_pubkey_pem = ek_pubkey.public_bytes(encoding=serialization.Encoding.PEM,
+                                               format=serialization.PublicFormat.SubjectPublicKeyInfo)
+        agent_uuid = hashlib.sha256(ek_pubkey_pem).hexdigest()
     elif agent_uuid == 'generate' or agent_uuid is None:
         agent_uuid = str(uuid.uuid4())
     elif agent_uuid == 'dmidecode':
@@ -560,17 +589,19 @@ def main():
     server = CloudAgentHTTPServer(serveraddr, Handler, agent_uuid)
     serverthread = threading.Thread(target=server.serve_forever)
 
-    logger.info("Starting Cloud Agent on %s:%s use <Ctrl-C> to stop", serveraddr[0], serveraddr[1])
+    logger.info("Starting Cloud Agent on %s:%s with API version %s. Use <Ctrl-C> to stop", serveraddr[0], serveraddr[1], keylime_api_version.current_version())
     serverthread.start()
 
     # want to listen for revocations?
     if config.getboolean('cloud_agent', 'listen_notfications'):
         cert_path = config.get('cloud_agent', 'revocation_cert')
         if cert_path == "default":
-            cert_path = '%s/unzipped/RevocationNotifier-cert.crt' % (secdir)
+            cert_path = os.path.join(secdir,
+                                      "unzipped/RevocationNotifier-cert.crt")
         elif cert_path[0] != '/':
             # if it is a relative, convert to absolute in work_dir
-            cert_path = os.path.abspath('%s/%s' % (config.WORK_DIR, cert_path))
+            cert_path = os.path.abspath(
+                os.path.join(config.WORK_DIR, cert_path))
 
         def perform_actions(revocation):
             actionlist = []
@@ -582,8 +613,9 @@ def main():
                 actionlist = ["revocation_actions.%s" % i for i in actionlist]
 
             # load actions from unzipped
-            if os.path.exists("%s/unzipped/action_list" % secdir):
-                with open("%s/unzipped/action_list" % secdir, 'r') as f:
+            action_list_path = os.path.join(secdir, "unzipped/action_list")
+            if os.path.exists(action_list_path):
+                with open(action_list_path, encoding="utf-8") as f:
                     actionlisttxt = f.read()
                 if actionlisttxt.strip() != "":
                     localactions = actionlisttxt.strip().split(',')

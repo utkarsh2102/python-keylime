@@ -16,6 +16,7 @@ import tornado.ioloop
 import tornado.web
 
 from keylime import config
+from keylime.agentstates import AgentAttestStates
 from keylime.common import states
 from keylime.db.verifier_db import VerfierMain
 from keylime.db.verifier_db import VerifierAllowlist
@@ -24,6 +25,8 @@ from keylime import keylime_logging
 from keylime import cloud_verifier_common
 from keylime import revocation_notifier
 from keylime import tornado_requests
+from keylime import api_version as keylime_api_version
+from keylime.ima_ast import START_HASH
 
 logger = keylime_logging.init_logging('cloudverifier')
 
@@ -39,6 +42,10 @@ def get_session():
     return SessionManager().make_session(engine)
 
 
+def get_AgentAttestStates():
+    return AgentAttestStates.get_instance()
+
+
 # The "exclude_db" dict values are removed from the response before adding the dict to the DB
 # This is because we want these values to remain ephemeral and not stored in the database.
 exclude_db = {
@@ -49,6 +56,11 @@ exclude_db = {
     'num_retries': 0,
     'pending_event': None,
     'first_verified': False,
+    # the following 3 items are updated to VerifierDB only when the AgentState is stored
+    'boottime': '',
+    'ima_pcrs': [],
+    'pcr10': '',
+    'next_ima_ml_entry': 0
 }
 
 
@@ -71,11 +83,43 @@ def _from_db_obj(agent_db_obj):
                 'accept_tpm_signing_algs', \
                 'hash_alg', \
                 'enc_alg', \
-                'sign_alg']
+                'sign_alg', \
+                'boottime', \
+                'ima_pcrs', \
+                'pcr10', \
+                'next_ima_ml_entry']
     agent_dict = {}
     for field in fields:
         agent_dict[field] = getattr(agent_db_obj, field, None)
     return agent_dict
+
+
+def verifier_db_delete_agent(session, agent_id):
+    get_AgentAttestStates().delete_by_agent_id(agent_id)
+    session.query(VerfierMain).filter_by(
+                  agent_id=agent_id).delete()
+    session.commit()
+
+
+def store_attestation_state(agentAttestState):
+    # Only store if IMA log was evaluated
+    if len(agentAttestState.get_ima_pcrs()):
+        session = get_session()
+        try:
+            update_agent = session.query(VerfierMain).get(agentAttestState.get_agent_id())
+            update_agent.boottime = agentAttestState.get_boottime()
+            update_agent.next_ima_ml_entry = agentAttestState.get_next_ima_ml_entry()
+            ima_pcrs_dict = agentAttestState.get_ima_pcrs()
+            update_agent.ima_pcrs = list(ima_pcrs_dict.keys())
+            for pcr_num, value in ima_pcrs_dict.items():
+                setattr(update_agent, 'pcr%d' % pcr_num, value)
+            try:
+                session.add(update_agent)
+            except SQLAlchemyError as e:
+                logger.error('SQLAlchemy Error on storing attestation state: %s', e)
+            session.commit()
+        except SQLAlchemyError as e:
+            logger.error('SQLAlchemy Error on storing attestation state: %s', e)
 
 
 class BaseHandler(tornado.web.RequestHandler):
@@ -132,6 +176,45 @@ class MainHandler(tornado.web.RequestHandler):
     def data_received(self, chunk):
         raise NotImplementedError()
 
+class VersionHandler(BaseHandler):
+
+    def head(self):
+        config.echo_json_response(
+            self, 405, "Not Implemented: Use GET interface instead")
+
+    def get(self):
+        rest_params = config.get_restful_params(self.request.uri)
+        if rest_params is None:
+            config.echo_json_response(self, 405, "Not Implemented")
+            return
+
+        if "version" not in rest_params:
+            config.echo_json_response(self, 400, "URI not supported")
+            logger.warning('GET returning 400 response. URI not supported: %s', self.request.path)
+            return
+
+        version_info = {
+            "current_version": keylime_api_version.current_version(),
+            "supported_versions": keylime_api_version.all_versions(),
+        }
+
+        config.echo_json_response(self, 200, "Success", version_info)
+
+    def delete(self):
+        config.echo_json_response(
+            self, 405, "Not Implemented: Use GET interface instead")
+
+    def post(self):
+        config.echo_json_response(
+            self, 405, "Not Implemented: Use GET interface instead")
+
+    def put(self):
+        config.echo_json_response(
+            self, 405, "Not Implemented: Use GET interface instead")
+
+    def data_received(self, chunk):
+        raise NotImplementedError()
+
 
 class AgentsHandler(BaseHandler):
     def head(self):
@@ -152,6 +235,10 @@ class AgentsHandler(BaseHandler):
         if rest_params is None:
             config.echo_json_response(
                 self, 405, "Not Implemented: Use /agents/ interface")
+            return
+
+        if not rest_params["api_version"]:
+            config.echo_json_response(self, 400, "API Version not supported")
             return
 
         if "agents" not in rest_params:
@@ -213,6 +300,10 @@ class AgentsHandler(BaseHandler):
                 self, 405, "Not Implemented: Use /agents/ interface")
             return
 
+        if not rest_params["api_version"]:
+            config.echo_json_response(self, 400, "API Version not supported")
+            return
+
         if "agents" not in rest_params:
             config.echo_json_response(self, 400, "uri not supported")
             return
@@ -245,9 +336,7 @@ class AgentsHandler(BaseHandler):
         if op_state in (states.SAVED, states.FAILED, states.TERMINATED,
                         states.TENANT_FAILED, states.INVALID_QUOTE):
             try:
-                session.query(VerfierMain).filter_by(
-                    agent_id=agent_id).delete()
-                session.commit()
+                verifier_db_delete_agent(session, agent_id)
             except SQLAlchemyError as e:
                 logger.error('SQLAlchemy Error: %s', e)
             config.echo_json_response(self, 200, "Success")
@@ -278,6 +367,10 @@ class AgentsHandler(BaseHandler):
             if rest_params is None:
                 config.echo_json_response(
                     self, 405, "Not Implemented: Use /agents/ interface")
+                return
+
+            if not rest_params["api_version"]:
+                config.echo_json_response(self, 400, "API Version not supported")
                 return
 
             if "agents" not in rest_params:
@@ -315,6 +408,10 @@ class AgentsHandler(BaseHandler):
                     agent_data['enc_alg'] = ""
                     agent_data['sign_alg'] = ""
                     agent_data['agent_id'] = agent_id
+                    agent_data['boottime'] = 0
+                    agent_data['ima_pcrs'] = []
+                    agent_data['pcr10'] = START_HASH
+                    agent_data['next_ima_ml_entry'] = 0
                     agent_data['verifier_id'] = config.get('cloud_verifier', 'cloudverifier_id', cloud_verifier_common.DEFAULT_VERIFIER_ID)
                     agent_data['verifier_ip'] = config.get('cloud_verifier', 'cloudverifier_ip')
                     agent_data['verifier_port'] = config.get('cloud_verifier', 'cloudverifier_port')
@@ -373,6 +470,10 @@ class AgentsHandler(BaseHandler):
             if rest_params is None:
                 config.echo_json_response(
                     self, 405, "Not Implemented: Use /agents/ interface")
+                return
+
+            if not rest_params["api_version"]:
+                config.echo_json_response(self, 400, "API Version not supported")
                 return
 
             if "agents" not in rest_params:
@@ -437,12 +538,16 @@ class AllowlistHandler(BaseHandler):
     def get(self):
         """Get an allowlist
 
-        GET /(?:v[0-9]/)?allowlists/{name}
+        GET /allowlists/{name}
         """
 
         rest_params = config.get_restful_params(self.request.uri)
         if rest_params is None or 'allowlists' not in rest_params:
             config.echo_json_response(self, 400, "Invalid URL")
+            return
+
+        if not rest_params["api_version"]:
+            config.echo_json_response(self, 400, "API Version not supported")
             return
 
         allowlist_name = rest_params['allowlists']
@@ -472,12 +577,16 @@ class AllowlistHandler(BaseHandler):
     def delete(self):
         """Delete an allowlist
 
-        DELETE /(?:v[0-9]/)?allowlists/{name}
+        DELETE /allowlists/{name}
         """
 
         rest_params = config.get_restful_params(self.request.uri)
         if rest_params is None or 'allowlists' not in rest_params:
             config.echo_json_response(self, 400, "Invalid URL")
+            return
+
+        if not rest_params["api_version"]:
+            config.echo_json_response(self, 400, "API Version not supported")
             return
 
         allowlist_name = rest_params['allowlists']
@@ -519,13 +628,17 @@ class AllowlistHandler(BaseHandler):
     def post(self):
         """Create an allowlist
 
-        POST /(?:v[0-9]/)?allowlists/{name}
+        POST /allowlists/{name}
         body: {"tpm_policy": {..}, "vtpm_policy": {..}
         """
 
         rest_params = config.get_restful_params(self.request.uri)
         if rest_params is None or 'allowlists' not in rest_params:
             config.echo_json_response(self, 400, "Invalid URL")
+            return
+
+        if not rest_params["api_version"]:
+            config.echo_json_response(self, 400, "API Version not supported")
             return
 
         allowlist_name = rest_params['allowlists']
@@ -597,9 +710,10 @@ async def invoke_get_quote(agent, need_pubkey):
     if need_pubkey:
         partial_req = "0"
 
+    version = keylime_api_version.current_version()
     res = tornado_requests.request("GET",
-                                   "http://%s:%d/quotes/integrity?nonce=%s&mask=%s&vmask=%s&partial=%s" %
-                                   (agent['ip'], agent['port'], params["nonce"], params["mask"], params['vmask'], partial_req), context=None)
+                                   "http://%s:%d/v%s/quotes/integrity?nonce=%s&mask=%s&vmask=%s&partial=%s&ima_ml_entry=%d" %
+                                   (agent['ip'], agent['port'], version, params["nonce"], params["mask"], params['vmask'], partial_req, params['ima_ml_entry']), context=None)
     response = await res
 
     if response.status_code != 200:
@@ -618,13 +732,17 @@ async def invoke_get_quote(agent, need_pubkey):
             # validate the cloud agent response
             if 'provide_V' not in agent :
                 agent['provide_V'] = True
-            if cloud_verifier_common.process_quote_response(agent, json_response['results']):
+            agentAttestState = get_AgentAttestStates().get_by_agent_id(agent['agent_id'])
+            if cloud_verifier_common.process_quote_response(agent, json_response['results'], agentAttestState):
                 if agent['provide_V']:
                     asyncio.ensure_future(process_agent(agent, states.PROVIDE_V))
                 else:
                     asyncio.ensure_future(process_agent(agent, states.GET_QUOTE))
             else:
                 asyncio.ensure_future(process_agent(agent, states.INVALID_QUOTE))
+
+            # store the attestation state
+            store_attestation_state(agentAttestState)
 
         except Exception as e:
             logger.exception(e)
@@ -639,8 +757,9 @@ async def invoke_provide_v(agent):
     except KeyError:
         pass
     v_json_message = cloud_verifier_common.prepare_v(agent)
+    version = keylime_api_version.current_version()
     res = tornado_requests.request(
-        "POST", "http://%s:%d//keys/vkey" % (agent['ip'], agent['port']), data=v_json_message)
+        "POST", "http://%s:%d/%s/keys/vkey" % (agent['ip'], agent['port'], version), data=v_json_message)
     response = await res
 
     if response.status_code != 200:
@@ -675,9 +794,7 @@ async def process_agent(agent, new_operational_state):
             if agent['pending_event'] is not None:
                 tornado.ioloop.IOLoop.current().remove_timeout(
                     agent['pending_event'])
-            session.query(VerfierMain).filter_by(
-                agent_id=agent['agent_id']).delete()
-            session.commit()
+            verifier_db_delete_agent(session, agent['agent_id'])
             return
 
         # if the user tells us to stop polling because the tenant quote check failed
@@ -796,6 +913,7 @@ async def process_agent(agent, new_operational_state):
 
 async def activate_agents(verifier_id, verifier_ip, verifier_port):
     session = get_session()
+    aas = get_AgentAttestStates()
     try:
         agents = session.query(VerfierMain).filter_by(
             verifier_id=verifier_id).all()
@@ -804,6 +922,11 @@ async def activate_agents(verifier_id, verifier_ip, verifier_port):
             agent.verifier_host = verifier_port
             if agent.operational_state == states.START:
                 asyncio.ensure_future(process_agent(agent, states.GET_QUOTE))
+            if agent.boottime:
+                ima_pcrs_dict = {}
+                for pcr_num in agent.ima_pcrs:
+                    ima_pcrs_dict[pcr_num] = getattr(agent, 'pcr%d' % pcr_num)
+                aas.add(agent.agent_id, agent.boottime, ima_pcrs_dict, agent.next_ima_ml_entry)
         session.commit()
     except SQLAlchemyError as e:
         logger.error('SQLAlchemy Error: %s', e)
@@ -847,9 +970,13 @@ def main():
 
     logger.info('Starting Cloud Verifier (tornado) on port %s, use <Ctrl-C> to stop', cloudverifier_port)
 
+    # print out API versions we support
+    keylime_api_version.log_api_versions(logger)
+
     app = tornado.web.Application([
-        (r"/(?:v[0-9]/)?agents/.*", AgentsHandler),
-        (r"/(?:v[0-9]/)?allowlists/.*", AllowlistHandler),
+        (r"/v?[0-9]+(?:\.[0-9]+)?/agents/.*", AgentsHandler),
+        (r"/v?[0-9]+(?:\.[0-9]+)?/allowlists/.*", AllowlistHandler),
+        (r"/versions?", VersionHandler),
         (r".*", MainHandler),
     ])
 
