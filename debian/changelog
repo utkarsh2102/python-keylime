@@ -1,3 +1,23 @@
+keylime (6.2.0-1~ibmcloud0.1) bionic; urgency=medium
+
+  [ Thore Sommer ]
+  * New upstream version 6.2.0.
+  * d/control: add new dependencies:
+    - python3-packaging.
+    - python3-psutil.
+  * d/control: drop tpm2-abrmd as a dependency.
+
+  [ Miriam Espana Acebal ]
+  * d/p/using-ssl3.6-constant-for-TLSv12.patch:
+    Adapting ssl library use: new minimun_version 3.7
+    to 3.6 option use with OP_NO_TLSv1_2.
+
+  [ Utkarsh Gupta ]
+  * d/patches: Refresh patches.
+  * d/control: Move sqlalchemy and alembic to -server.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Mon, 13 Sep 2021 16:25:18 +0530
+
 keylime (6.1.1-1~ibmcloud0.1) bionic; urgency=medium
 
   [ Utkarsh Gupta ]
