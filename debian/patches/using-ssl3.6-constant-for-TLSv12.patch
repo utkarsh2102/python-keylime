@@ -13,20 +13,18 @@ Origin: vendor
 Forwarded: https://github.com/keylime/keylime/pull/752
 Last-Update: 2021-09-13
 
-Index: python-keylime/keylime/cloud_verifier_common.py
-===================================================================
---- a/keylime/cloud_verifier_common.py	2021-09-13 10:43:49.790895288 +0200
-+++ b/keylime/cloud_verifier_common.py	2021-09-13 11:01:55.819610186 +0200
+--- a/keylime/cloud_verifier_common.py
++++ b/keylime/cloud_verifier_common.py
 @@ -9,6 +9,7 @@
  import ssl
  import socket
  import time
 +import sys
-
+ 
  import simplejson as json
-
+ 
 @@ -114,7 +115,10 @@
-
+ 
      try:
          context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
 -        context.minimum_version = ssl.TLSVersion.TLSv1_2
