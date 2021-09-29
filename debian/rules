@@ -21,9 +21,9 @@ override_dh_installdeb:
 	dh_installdeb
 
 override_dh_installsystemd:
-	dh_installsystemd -p python3-keylime-agent --name keylime_agent
-	dh_installsystemd -p python3-keylime-server --name keylime_registrar
-	dh_installsystemd -p python3-keylime-server --name keylime_verifier
+	dh_installsystemd -p python3-keylime-agent --no-start --name keylime_agent
+	dh_installsystemd -p python3-keylime-server --no-start --name keylime_registrar
+	dh_installsystemd -p python3-keylime-server --no-start --name keylime_verifier
 	dh_installsystemd -p python3-keylime-agent --name var-lib-keylime-secure
 
 override_dh_gencontrol:
