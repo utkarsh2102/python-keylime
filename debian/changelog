@@ -1,3 +1,12 @@
+keylime (6.2.0-2~18.04+ibmcloud0.1) bionic; urgency=medium
+
+  * d/python3-keylime-agent.keylime_agent.service:
+    Make the path to chown absolute.
+  * d/rules: Don't auto-start services on
+    installation or upgrades.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Wed, 29 Sep 2021 15:57:16 +0530
+
 keylime (6.2.0-1~ibmcloud0.1) bionic; urgency=medium
 
   [ Thore Sommer ]
