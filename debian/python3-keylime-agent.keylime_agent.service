@@ -13,8 +13,8 @@ ConditionPathExistsGlob=/etc/keylime.conf
 User=keylime
 Group=tss
 Environment=TPM2TOOLS_TCTI=device:/dev/tpmrm0 KEYLIME_CONFIG=/etc/keylime.conf
-ExecStartPre=-+chown -hHR keylime:tss /sys/kernel/security/tpm0
-ExecStartPre=-+chown -hHR keylime:tss /sys/kernel/security/ima
+ExecStartPre=-+/bin/chown -hHR keylime:tss /sys/kernel/security/tpm0
+ExecStartPre=-+/bin/chown -hHR keylime:tss /sys/kernel/security/ima
 ExecStart=/usr/bin/keylime_agent
 KillSignal=SIGINT
 TimeoutSec=60s
