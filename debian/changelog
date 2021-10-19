@@ -1,4 +1,11 @@
-keylime (6.2.0-2~18.04+ibmcloud0.1) bionic; urgency=medium
+keylime (6.2.0-3) unstable; urgency=medium
+
+  * d/control: Drop libtss2-dev from
+    Depends/Build-Depends as it's not needed.
+
+ -- Utkarsh Gupta <utkarsh.gupta@canonical.com>>  Tue, 19 Oct 2021 19:59:08 +0530
+
+keylime (6.2.0-2) unstable; urgency=medium
 
   * d/python3-keylime-agent.keylime_agent.service:
     Make the path to chown absolute.
@@ -7,7 +14,7 @@ keylime (6.2.0-2~18.04+ibmcloud0.1) bionic; urgency=medium
 
  -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Wed, 29 Sep 2021 15:57:16 +0530
 
-keylime (6.2.0-1~ibmcloud0.1) bionic; urgency=medium
+keylime (6.2.0-1) unstable; urgency=medium
 
   [ Thore Sommer ]
   * New upstream version 6.2.0.
@@ -27,7 +34,7 @@ keylime (6.2.0-1~ibmcloud0.1) bionic; urgency=medium
 
  -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Mon, 13 Sep 2021 16:25:18 +0530
 
-keylime (6.1.1-1~ibmcloud0.1) bionic; urgency=medium
+keylime (6.1.1-1) unstable; urgency=medium
 
   [ Utkarsh Gupta ]
   * New upstream version 6.1.1.
@@ -83,13 +90,13 @@ keylime (6.1.1-1~ibmcloud0.1) bionic; urgency=medium
 
  -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Wed, 01 Sep 2021 11:11:11 +0530
 
-keylime (6.1.0-1~ibmcloud0.2) bionic; urgency=medium
+keylime (6.1.0-2) unstable; urgency=medium
 
   * Add needed Python modules to 'Depends'.
 
  -- Utkarsh Gupta <utkarsh.gupta@canonical.com>  Thu, 13 May 2021 23:38:43 +0530
 
-keylime (6.1.0-1~ibmcloud0.1) bionic; urgency=medium
+keylime (6.1.0-1) unstable; urgency=medium
 
   * Initial release.
 
