@@ -7,10 +7,9 @@ import os
 import logging
 import sys
 
-import simplejson as json
-
 from keylime import config
 from keylime import crypto
+from keylime import json
 from keylime import keylime_logging
 from keylime.requests_client import RequestsClient
 from keylime import api_version as keylime_api_version
@@ -195,6 +194,8 @@ def doRegistrarDelete(registrar_ip, registrar_port, agent_id):
     else:
         logger.warning("Status command response: %s Unexpected response from registrar.", response.status_code)
         keylime_logging.log_http_response(logger, logging.WARNING, response_body)
+
+    return response_body
 
 
 def doRegistrarList(registrar_ip, registrar_port):

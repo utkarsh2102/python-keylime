@@ -20,32 +20,55 @@ from keylime import keylime_logging
 from keylime import ima_ast
 from keylime.agentstates import AgentAttestState
 from keylime import ima_file_signatures
+from keylime.failure import Failure, Component
 
 
 logger = keylime_logging.init_logging('ima')
 
 
 # The version of the allowlist format that is supported by this keylime release
-ALLOWLIST_CURRENT_VERSION = 2
+ALLOWLIST_CURRENT_VERSION = 4
 
 
-def get_from_nth_entry(filedata, nth_entry):
-    """ Get the measurement list starting at the n-th entry, starting with 0.
-        Also count the total number of entries by counting the newlines.
+class IMAMeasurementList:
+    """ IMAMeasurementList models the IMA measurement lists's last known
+        two numbers of entries and filesizes
     """
-    num_entries = 0
-    offset = 0
-    result = None
-    while True:
-        try:
-            if num_entries == nth_entry:
-                result = filedata[offset:]
-            o = filedata.index('\n', offset)
-            offset = o + 1
-            num_entries += 1
-        except ValueError:
-            break
-    return result, num_entries
+    instance = None
+
+    @staticmethod
+    def get_instance():
+        """ Return a singleton """
+        if not IMAMeasurementList.instance:
+            IMAMeasurementList.instance = IMAMeasurementList()
+        return IMAMeasurementList.instance
+
+    def __init__(self):
+        """ Constructor """
+        self.entries = set()
+        self.reset()
+
+    def reset(self):
+        """ Reset the variables """
+        self.entries = set()
+
+    def update(self, num_entries, filesize):
+        """ Update the number of entries and current filesize of the log. """
+        if len(self.entries) > 256:
+            for entry in self.entries:
+                self.entries.discard(entry)
+                break
+        self.entries.add((num_entries, filesize))
+
+    def find(self, nth_entry):
+        """ Find the closest entry to the n-th entry and return its number
+            and filesize to seek to, return 0, 0 if nothing was found.
+        """
+        best = (0, 0)
+        for entry in self.entries:
+            if entry[0] > best[0] and entry[0] <= nth_entry:
+                best = entry
+        return best
 
 
 def read_measurement_list(filename, nth_entry):
@@ -57,18 +80,39 @@ def read_measurement_list(filename, nth_entry):
         This function returns the measurement list and the entry from where it
         was read and the current number of entries in the file.
     """
+    IMAML = IMAMeasurementList.get_instance()
     ml = None
-    num_entries = 0
+
+    # Try to find the closest entry to the nth_entry
+    num_entries, filesize = IMAML.find(nth_entry)
 
     if not os.path.exists(filename):
+        IMAML.reset()
+        nth_entry = 0
         logger.warning("IMA measurement list not available: %s", filename)
     else:
         with open(filename, 'r', encoding="utf-8") as f:
+            f.seek(filesize)
             filedata = f.read()
-        ml, num_entries = get_from_nth_entry(filedata, nth_entry)
-        if nth_entry > num_entries:
-            nth_entry = 0
-            ml = filedata
+        # filedata now corresponds to starting list at entry number 'IMAML.num_entries'
+        # find n-th entry and determine number of total entries in file now
+        offset = 0
+        while True:
+            try:
+                if nth_entry == num_entries:
+                    ml = filedata[offset:]
+                o = filedata.index('\n', offset)
+                offset = o + 1
+                num_entries += 1
+            except ValueError:
+                break
+        # IMAML.filesize corresponds to position for entry number 'IMAML.num_entries'
+        IMAML.update(num_entries, filesize + offset)
+
+        # Nothing found? User request beyond next-expected entry.
+        # Start over with entry 0. This cannot recurse again.
+        if ml is None:
+            return read_measurement_list(filename, 0)
 
     return ml, nth_entry, num_entries
 
@@ -77,39 +121,49 @@ def read_unpack(fd, fmt):
     return struct.unpack(fmt, fd.read(struct.calcsize(fmt)))
 
 
-def _validate_ima_ng(exclude_regex, allowlist, digest: ima_ast.Digest, path: ima_ast.Name, hash_types='hashes'):
-    if allowlist is not None and allowlist.get(hash_types) is not None:
+
+def _validate_ima_ng(exclude_regex, allowlist, digest: ima_ast.Digest, path: ima_ast.Name, hash_types='hashes') -> Failure:
+    failure = Failure(Component.IMA, ["validation", "ima-ng"])
+    if allowlist is not None:
         if exclude_regex is not None and exclude_regex.match(path.name):
             logger.debug("IMA: ignoring excluded path %s" % path)
-            return True
+            return failure
 
         accept_list = allowlist[hash_types].get(path.name, None)
         if accept_list is None:
-            logger.warning("Entry not found in allowlist: %s" % (path.name))
-            return False
+            logger.warning(f"File not found in allowlist: {path.name}")
+            failure.add_event("not_in_allowlist", f"File not found in allowlist: {path.name}", True)
+            return failure
 
         if codecs.encode(digest.hash, 'hex').decode('utf-8') not in accept_list:
             logger.warning("Hashes for file %s don't match %s not in %s" %
                            (path.name,
                             codecs.encode(digest.hash, 'hex').decode('utf-8'),
                             accept_list))
-            return False
+            failure.add_event(
+                "allowlist_hash",
+                {"message": "Hash not in allowlist found",
+                 "got": codecs.encode(digest.hash, 'hex').decode('utf-8'),
+                 "expected": accept_list}, True)
+            return failure
 
-    return True
+    return failure
 
 
-def _validate_ima_sig(exclude_regex, ima_keyring, allowlist, digest: ima_ast.Digest, path: ima_ast.Name,
-                      signature: ima_ast.Signature):
+def _validate_ima_sig(exclude_regex, ima_keyrings, allowlist, digest: ima_ast.Digest, path: ima_ast.Name,
+                      signature: ima_ast.Signature) -> Failure:
+    failure = Failure(Component.IMA, ["validator", "ima-sig"])
     valid_signature = False
-    if ima_keyring and signature:
+    if ima_keyrings and signature:
 
         if exclude_regex is not None and exclude_regex.match(path.name):
             logger.debug(f"IMA: ignoring excluded path {path.name}")
-            return True
+            return failure
 
-        if not ima_keyring.integrity_digsig_verify(signature.data, digest.hash, digest.algorithm):
+        if not ima_keyrings.integrity_digsig_verify(signature.data, digest.hash, digest.algorithm):
             logger.warning(f"signature for file {path.name} is not valid")
-            return False
+            failure.add_event("invalid_signature", f"signature for file {path.name} is not valid", True)
+            return failure
 
         valid_signature = True
         logger.debug("signature for file %s is good" % path)
@@ -123,23 +177,35 @@ def _validate_ima_sig(exclude_regex, ima_keyring, allowlist, digest: ima_ast.Dig
         return _validate_ima_ng(exclude_regex, allowlist, digest, path)
 
     # If we don't have a allowlist and don't have a keyring we just ignore the validation.
-    if ima_keyring is None:
-        return True
+    if ima_keyrings is None:
+        return failure
 
-    return valid_signature
+    if not valid_signature:
+        failure.add_event("invalid_signature", f"signature for file {path.name} could not be validated", True)
+    return failure
 
 
-def _validate_ima_buf(exclude_regex, allowlist, digest: ima_ast.Digest, path: ima_ast.Name, data: ima_ast.Buffer):
+def _validate_ima_buf(exclude_regex, allowlist, ima_keyrings: ima_file_signatures.ImaKeyrings, digest: ima_ast.Digest, path: ima_ast.Name, data: ima_ast.Buffer):
+    failure = Failure(Component.IMA)
     # Is data.data a key?
-    pubkey, _ = ima_file_signatures.get_pubkey(data.data)
+    pubkey, keyidv2 = ima_file_signatures.get_pubkey(data.data)
     if pubkey:
-        return _validate_ima_ng(exclude_regex, allowlist, digest, path, hash_types='keyrings')
+        ignored_keyrings = allowlist['ima']['ignored_keyrings']
+        if '*' not in ignored_keyrings and path.name not in ignored_keyrings:
+            failure = _validate_ima_ng(exclude_regex, allowlist, digest, path, hash_types='keyrings')
+            if not failure:
+                # Add the key only now that it's validated (no failure)
+                ima_keyrings.add_pubkey_to_keyring(pubkey, path.name, keyidv2=keyidv2)
+    else:
+        # handling of generic ima-buf entries that for example carry a hash in the buf field
+        failure = _validate_ima_ng(exclude_regex, allowlist, digest, path, hash_types='ima-buf')
 
     # Anything else evaluates to true for now
-    return True
+    return failure
 
 
-def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcrval=None, ima_keyring=None, boot_aggregates=None):
+def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcrval=None, ima_keyrings=None, boot_aggregates=None):
+    failure = Failure(Component.IMA)
     running_hash = agentAttestState.get_pcr_state(config.IMA_PCR)
     found_pcr = (pcrval is None)
     errors = {}
@@ -172,12 +238,19 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
         logger.error(err_msg)
 
     ima_validator = ima_ast.Validator(
-        {ima_ast.ImaSig: functools.partial(_validate_ima_sig, compiled_regex, ima_keyring, allow_list),
+        {ima_ast.ImaSig: functools.partial(_validate_ima_sig, compiled_regex, ima_keyrings, allow_list),
          ima_ast.ImaNg: functools.partial(_validate_ima_ng, compiled_regex, allow_list),
          ima_ast.Ima: functools.partial(_validate_ima_ng, compiled_regex, allow_list),
-         ima_ast.ImaBuf: functools.partial(_validate_ima_buf, compiled_regex, allow_list),
+         ima_ast.ImaBuf: functools.partial(_validate_ima_buf, compiled_regex, allow_list, ima_keyrings),
          }
     )
+
+    # Iterative attestation may send us no log [len(lines) == 1]; compare last know PCR 10 state
+    # against current PCR state.
+    # Since IMA log append and PCR extend is not atomic, we may get a quote that does not yet take
+    # into account the next appended measurement's [len(lines) == 2] PCR extension.
+    if not found_pcr and len(lines) <= 2:
+        found_pcr = (running_hash == pcrval_bytes)
 
     for linenum, line in enumerate(lines):
         line = line.strip()
@@ -190,7 +263,10 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
             # update hash
             running_hash = hashlib.sha1(running_hash + entry.template_hash).digest()
 
-            if not entry.valid():
+            validation_failure = entry.invalid()
+
+            if validation_failure:
+                failure.merge(validation_failure)
                 errors[type(entry.mode)] = errors.get(type(entry.mode), 0) + 1
 
             if not found_pcr:
@@ -208,51 +284,67 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
                 path = entry.mode.path.name
                 m2w.write(f"{hash_value} {path}\n")
         except ima_ast.ParserError:
+            failure.add_event("entry", f"Line was not parsable into a valid IMA entry: {line}", True, ["parser"])
             logger.error(f"Line was not parsable into a valid IMA entry: {line}")
-
-    # iterative attestation may send us no log; compare last know PCR 10 state
-    # against current PCR state
-    if not found_pcr:
-        found_pcr = (running_hash == pcrval_bytes)
 
     # check PCR value has been found
     if not found_pcr:
-        logger.error("IMA measurement list does not match TPM PCR %s" % pcrval)
-        return None
+        logger.error(f"IMA measurement list does not match TPM PCR {pcrval}")
+        failure.add_event("pcr_mismatch", f"IMA measurement list does not match TPM PCR {pcrval}", True)
 
     # Check if any validators failed
     if sum(errors.values()) > 0:
         error_msg = "IMA ERRORS: Some entries couldn't be validated. Number of failures in modes: "
         error_msg += ", ".join([f'{k.__name__ } {v}' for k, v in errors.items()])
         logger.error(error_msg + ".")
-        return None
 
-    return codecs.encode(running_hash, 'hex').decode('utf-8')
+    return codecs.encode(running_hash, 'hex').decode('utf-8'), failure
 
 
-def process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcrval=None, ima_keyring=None, boot_aggregates=None):
-    result = None
+def process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcrval=None, ima_keyrings=None, boot_aggregates=None):
+    failure = Failure(Component.IMA)
     try:
-        result = _process_measurement_list(agentAttestState, lines, lists=lists, m2w=m2w, pcrval=pcrval, ima_keyring=ima_keyring, boot_aggregates=boot_aggregates)
+        running_hash, failure = _process_measurement_list(agentAttestState, lines, lists=lists, m2w=m2w, pcrval=pcrval, ima_keyrings=ima_keyrings, boot_aggregates=boot_aggregates)
     except:  # pylint: disable=try-except-raise
         raise
     finally:
-        if not result:
+        if failure:
+            # TODO currently reset on any failure which might be an issue
             agentAttestState.reset_ima_attestation()
 
-    return result
+    return running_hash, failure
 
+def update_allowlist(allowlist):
+    """ Update the allowlist to the latest version adding default values for missing fields """
+    allowlist["meta"]["version"] = ALLOWLIST_CURRENT_VERSION
+
+    # version 2 added 'keyrings'
+    if "keyrings" not in allowlist:
+        allowlist["keyrings"] = {}
+    # version 3 added 'ima' map with 'ignored_keyrings'
+    if "ima" not in allowlist:
+        allowlist["ima"] = {}
+    if not "ignored_keyrings" in allowlist["ima"]:
+        allowlist["ima"]["ignored_keyrings"] = []
+    # version 4 added 'ima-buf'
+    if "ima-buf" not in allowlist:
+        allowlist["ima-buf"] = {}
+
+    return allowlist
 
 def process_allowlists(allowlist, exclude):
     # Pull in default config values if not specified
     if allowlist is None:
         allowlist = read_allowlist()
+    else:
+        allowlist = update_allowlist(allowlist)
+
     if exclude is None:
         exclude = read_excllist()
 
     if allowlist['hashes'].get('boot_aggregate') is None:
         logger.warning("No boot_aggregate value found in allowlist, adding an empty one")
-        allowlist['hashes']['boot_aggregate'] = ['0000000000000000000000000000000000000000']
+        allowlist['hashes']['boot_aggregate'] = ['0'*40, '0'*64]
 
     for excl in exclude:
         # remove commented out lines
@@ -270,7 +362,10 @@ empty_allowlist = {
         },
     "release": 0,
     "hashes": {},
-    "keyrings": {}
+    "keyrings": {},
+    "ima" : {
+        "ignored_keyrings": []
+    }
 }
 
 def read_allowlist(al_path=None, checksum="", gpg_sig_file=None, gpg_key_file=None):
@@ -325,9 +420,6 @@ def read_allowlist(al_path=None, checksum="", gpg_sig_file=None, gpg_key_file=No
         else:
             logger.debug("Allowlist does not specify a version. Assuming current version %s", ALLOWLIST_CURRENT_VERSION)
 
-        # version 2 added 'keyrings'
-        if "keyrings" not in alist:
-            alist["keyrings"] = {}
     else:
         # convert legacy format into new structured format
         logger.debug("Converting legacy allowlist format to JSON")
@@ -361,6 +453,8 @@ def read_allowlist(al_path=None, checksum="", gpg_sig_file=None, gpg_key_file=No
             else:
                 alist[entrytype][path] = [checksum_hash]
 
+    alist = update_allowlist(alist)
+
     return alist
 
 
@@ -373,8 +467,11 @@ def read_excllist(exclude_path=None):
     excl_list = []
     if os.path.exists(exclude_path):
         with open(exclude_path, encoding="utf-8") as f:
-            excl_list = f.read()
-        excl_list = excl_list.splitlines()
+            for line in f :
+                line = line.strip()
+                if line.startswith('#') or len(line) == 0:
+                    continue
+                excl_list.append(line)
 
         logger.debug("Loaded exclusion list from %s: %s" %
                      (exclude_path, excl_list))
