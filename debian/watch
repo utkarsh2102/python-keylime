@@ -1,2 +1,2 @@
 version=4
-https://github.com/keylime/keylime/releases .*/([\d\.]+).tar.gz
+https://github.com/keylime/keylime/releases .*/[v]?([\d\.]+).tar.gz
