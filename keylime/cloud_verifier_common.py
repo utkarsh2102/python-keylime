@@ -9,16 +9,17 @@ import os
 import ssl
 import socket
 import time
-
-import simplejson as json
+import sys
 
 from keylime import config
 from keylime import keylime_logging
 from keylime import registrar_client
 from keylime import crypto
 from keylime import ca_util
+from keylime import json
 from keylime import revocation_notifier
 from keylime.agentstates import AgentAttestStates
+from keylime.failure import Failure, Component
 from keylime.tpm.tpm_main import tpm
 from keylime.tpm.tpm_abstract import TPM_Utilities
 from keylime.common import algorithms
@@ -114,7 +115,10 @@ def init_mtls(section='cloud_verifier', generatedir='cv_ca'):
 
     try:
         context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        if sys.version_info >= (3,7):
+            context.minimum_version = ssl.TLSVersion.TLSv1_2
+        else:
+            context.options &= ~ssl.OP_NO_TLSv1_2
         context.load_verify_locations(cafile=ca_path)
         context.load_cert_chain(
             certfile=my_cert, keyfile=my_priv_key, password=my_key_pw)
@@ -133,11 +137,12 @@ def init_mtls(section='cloud_verifier', generatedir='cv_ca'):
     return context
 
 
-def process_quote_response(agent, json_response, agentAttestState):
+def process_quote_response(agent, json_response, agentAttestState) -> Failure:
     """Validates the response from the Cloud agent.
 
     This method invokes an Registrar Server call to register, and then check the quote.
     """
+    failure = Failure(Component.QUOTE_VALIDATION)
     received_public_key = None
     quote = None
     # in case of failure in response content do not continue
@@ -157,9 +162,11 @@ def process_quote_response(agent, json_response, agentAttestState):
         logger.debug("received ima_measurement_list_entry: %d", ima_measurement_list_entry)
         logger.debug("received boottime: %s", boottime)
         logger.debug("received boot log    %s", (mb_measurement_list is not None))
-    except Exception:
-        return None
+    except Exception as e:
+        failure.add_event("invalid_data", {"message": "parsing agents get quote respone failed", "data": e}, False)
+        return failure
 
+    # TODO: Are those separate failures?
     if not isinstance(ima_measurement_list_entry, int):
         raise Exception("ima_measurement_list_entry parameter must be an integer")
 
@@ -170,7 +177,8 @@ def process_quote_response(agent, json_response, agentAttestState):
     if received_public_key is None:
         if agent.get('public_key', "") == "" or agent.get('b64_encrypted_V', "") == "":
             logger.error("agent did not provide public key and no key or encrypted_v was cached at CV")
-            return False
+            failure.add_event("no_pubkey", "agent did not provide public key and no key or encrypted_v was cached at CV", False)
+            return failure
         agent['provide_V'] = False
         received_public_key = agent['public_key']
 
@@ -180,7 +188,8 @@ def process_quote_response(agent, json_response, agentAttestState):
             "cloud_verifier", "registrar_port"), agent['agent_id'])
         if registrar_data is None:
             logger.warning("AIK not found in registrar, quote not validated")
-            return False
+            failure.add_event("no_aik", "AIK not found in registrar, quote not validated", False)
+            return failure
         agent['registrar_data'] = registrar_data
 
     hash_alg = json_response.get('hash_alg')
@@ -194,38 +203,53 @@ def process_quote_response(agent, json_response, agentAttestState):
 
     # Ensure hash_alg is in accept_tpm_hash_alg list
     if not algorithms.is_accepted(hash_alg, agent['accept_tpm_hash_algs']):
-        raise Exception(
-            "TPM Quote is using an unaccepted hash algorithm: %s" % hash_alg)
+        logger.error(f"TPM Quote is using an unaccepted hash algorithm: {hash_alg}")
+        failure.add_event("invalid_hash_alg",
+                          {"message": f"TPM Quote is using an unaccepted hash algorithm: {hash_alg}", "data": hash_alg},
+                          False)
+        return failure
 
     # Ensure enc_alg is in accept_tpm_encryption_algs list
     if not algorithms.is_accepted(enc_alg, agent['accept_tpm_encryption_algs']):
-        raise Exception(
-            "TPM Quote is using an unaccepted encryption algorithm: %s" % enc_alg)
+        logger.error(f"TPM Quote is using an unaccepted encryption algorithm: {enc_alg}")
+        failure.add_event("invalid_enc_alg",
+                          {"message": f"TPM Quote is using an unaccepted encryption algorithm: {enc_alg}", "data": enc_alg},
+                          False)
+        return failure
 
     # Ensure sign_alg is in accept_tpm_encryption_algs list
     if not algorithms.is_accepted(sign_alg, agent['accept_tpm_signing_algs']):
-        raise Exception(
-            "TPM Quote is using an unaccepted signing algorithm: %s" % sign_alg)
+        logger.error(f"TPM Quote is using an unaccepted signing algorithm: {sign_alg}")
+        failure.add_event("invalid_sign_alg",
+                          {"message": f"TPM Quote is using an unaccepted signing algorithm: {sign_alg}", "data": {sign_alg}},
+                          False)
+        return failure
 
     if ima_measurement_list_entry == 0:
         agentAttestState.reset_ima_attestation()
     elif ima_measurement_list_entry != agentAttestState.get_next_ima_ml_entry():
         # If we requested a particular entry number then the agent must return either
         # starting at 0 (handled above) or with the requested number.
-        raise Exception(
-            "Agent did not respond with requested next IMA measurement list entry %d but started at %d" %
-            (agentAttestState.get_next_ima_ml_entry(), ima_measurement_list_entry))
+        logger.error("Agent did not respond with requested next IMA measurement list entry "
+                     f"{agentAttestState.get_next_ima_ml_entry()} but started at {ima_measurement_list_entry}")
+        failure.add_event("invalid_ima_entry_nb",
+                          {"message": "Agent did not respond with requested next IMA measurement list entry",
+                           "got": ima_measurement_list_entry, "expected": agentAttestState.get_next_ima_ml_entry()},
+                          False)
     elif not agentAttestState.is_expected_boottime(boottime):
         # agent sent a list not starting at 0 and provided a boottime that doesn't
         # match the expected boottime, so it must have been rebooted; we would fail
         # attestation this time so we retry with a full attestation next time.
         agentAttestState.reset_ima_attestation()
-        return True
+        return failure
 
     agentAttestState.set_boottime(boottime)
 
-    ima_keyring = ima_file_signatures.ImaKeyring.from_string(agent['ima_sign_verification_keys'])
-    validQuote = get_tpm_instance().check_quote(
+    ima_keyrings = agentAttestState.get_ima_keyrings()
+    tenant_keyring = ima_file_signatures.ImaKeyring.from_string(agent['ima_sign_verification_keys'])
+    ima_keyrings.set_tenant_keyring(tenant_keyring)
+
+    quote_validation_failure = get_tpm_instance().check_quote(
         agentAttestState,
         agent['nonce'],
         received_public_key,
@@ -235,24 +259,24 @@ def process_quote_response(agent, json_response, agentAttestState):
         ima_measurement_list,
         agent['allowlist'],
         hash_alg,
-        ima_keyring,
+        ima_keyrings,
         mb_measurement_list,
         agent['mb_refstate'])
-    if not validQuote:
-        return False
+    failure.merge(quote_validation_failure)
 
-    # set a flag so that we know that the agent was verified once.
-    # we only issue notifications for agents that were at some point good
-    agent['first_verified'] = True
+    if not failure:
+        # set a flag so that we know that the agent was verified once.
+        # we only issue notifications for agents that were at some point good
+        agent['first_verified'] = True
 
-    # has public key changed? if so, clear out b64_encrypted_V, it is no longer valid
-    if received_public_key != agent.get('public_key', ""):
-        agent['public_key'] = received_public_key
-        agent['b64_encrypted_V'] = ""
-        agent['provide_V'] = True
+        # has public key changed? if so, clear out b64_encrypted_V, it is no longer valid
+        if received_public_key != agent.get('public_key', ""):
+            agent['public_key'] = received_public_key
+            agent['b64_encrypted_V'] = ""
+            agent['provide_V'] = True
 
     # ok we're done
-    return validQuote
+    return failure
 
 
 def prepare_v(agent):
@@ -333,6 +357,8 @@ def process_get_status(agent):
                 'verifier_id' : agent.verifier_id,
                 'verifier_ip' : agent.verifier_ip,
                 'verifier_port' : agent.verifier_port,
+                'severity_level': agent.severity_level,
+                'last_event_id': agent.last_event_id
                 }
     return response
 
@@ -340,8 +366,10 @@ def process_get_status(agent):
 # sign a message with revocation key.  telling of verification problem
 
 
-def notify_error(agent, msgtype='revocation'):
-    if not config.getboolean('cloud_verifier', 'revocation_notifier'):
+def notify_error(agent, msgtype='revocation', event=None):
+    send_mq = config.getboolean('cloud_verifier', 'revocation_notifier')
+    send_webhook = config.getboolean('cloud_verifier', 'revocation_notifier_webhook', False)
+    if not (send_mq or send_webhook):
         return
 
     # prepare the revocation message:
@@ -353,6 +381,10 @@ def notify_error(agent, msgtype='revocation'):
                   'vtpm_policy': agent['vtpm_policy'],
                   'meta_data': agent['meta_data'],
                   'event_time': time.asctime()}
+    if event:
+        revocation['event_id'] = event.event_id
+        revocation['severity_label'] = event.severity_label.name
+        revocation['context'] = event.context
 
     tosend = {'msg': json.dumps(revocation).encode('utf-8')}
 
@@ -363,7 +395,10 @@ def notify_error(agent, msgtype='revocation'):
 
     else:
         tosend['signature'] = "none"
-    revocation_notifier.notify(tosend)
+    if send_mq:
+        revocation_notifier.notify(tosend)
+    if send_webhook:
+        revocation_notifier.notify_webhook(tosend)
 
 
 def validate_agent_data(agent_data):

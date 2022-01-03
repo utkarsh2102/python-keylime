@@ -1,17 +1,18 @@
-"""add_mb_refstate_column
+"""Store keyrings learned from IMA log
 
-Revision ID: ae898986c6e9
-Revises: cc2630851a1f
-Create Date: 2021-03-03 11:49:00.860132
+Revision ID: c3842cc9ee69
+Revises: 257fe0f0c039
+Create Date: 2021-09-14 13:12:29.306841
 
 """
 from alembic import op
 import sqlalchemy as sa
 
+import keylime
 
 # revision identifiers, used by Alembic.
-revision = 'ae898986c6e9'
-down_revision = 'cc2630851a1f'
+revision = 'c3842cc9ee69'
+down_revision = '257fe0f0c039'
 branch_labels = None
 depends_on = None
 
@@ -36,8 +37,8 @@ def downgrade_registrar():
 
 
 def upgrade_cloud_verifier():
-    op.add_column('verifiermain', sa.Column('mb_refstate', sa.String(1000)))
+    op.add_column('verifiermain', sa.Column('learned_ima_keyrings', keylime.db.verifier_db.JSONPickleType(), nullable=True))
 
 
 def downgrade_cloud_verifier():
-    op.drop_column('verifiermain', 'mb_refstate')
+    op.drop_column('verifiermain', 'learned_ima_keyrings')

@@ -5,28 +5,34 @@ Copyright 2017 Massachusetts Institute of Technology.
 
 import base64
 import binascii
+import hashlib
 import os
 import re
 import sys
 import tempfile
 import threading
 import time
+import typing
 import zlib
 import codecs
 from distutils.version import StrictVersion
 
-import M2Crypto
+from cryptography import exceptions as crypto_exceptions
+from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization as crypto_serialization
-import simplejson as json
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography import x509
 
 from keylime import cmd_exec
 from keylime import config
+from keylime import json
 from keylime import keylime_logging
 from keylime import secure_mount
 from keylime.tpm import tpm_abstract
 from keylime import tpm_ek_ca
 from keylime.common import algorithms
 from keylime.tpm import tpm2_objects
+from keylime.failure import Failure, Component
 
 logger = keylime_logging.init_logging('tpm')
 
@@ -38,7 +44,8 @@ def _get_cmd_env():
         lib_path = env['LD_LIBRARY_PATH']
     if 'TPM2TOOLS_TCTI' not in env:
         # Don't clobber existing setting (if present)
-        env['TPM2TOOLS_TCTI'] = 'tabrmd:bus_name=com.intel.tss2.Tabrmd'
+        env['TPM2TOOLS_TCTI'] = 'device:/dev/tpmrm0'
+        # env['TPM2TOOLS_TCTI'] = 'tabrmd:bus_name=com.intel.tss2.Tabrmd'
         # Other (not recommended) options are direct emulator and chardev communications:
         # env['TPM2TOOLS_TCTI'] = 'mssim:port=2321'
         # env['TPM2TOOLS_TCTI'] = 'device:/dev/tpm0'
@@ -846,18 +853,33 @@ class tpm(tpm_abstract.AbstractTPM):
         """
         # openssl x509 -inform der -in certificate.cer -out certificate.pem
         try:
-            ek509 = M2Crypto.X509.load_cert_der_string(ekcert)
+            ek509 = x509.load_der_x509_certificate(
+                data=ekcert,
+                backend=default_backend(),
+            )
 
             trusted_certs = tpm_ek_ca.cert_loader()
             for cert in trusted_certs:
-                signcert = M2Crypto.X509.load_cert_string(cert)
-                if str(ek509.get_issuer()) != str(signcert.get_subject()):
+                signcert = x509.load_pem_x509_certificate(
+                    data=cert.encode(),
+                    backend=default_backend(),
+                )
+
+                if ek509.issuer.rfc4514_string() != signcert.subject.rfc4514_string():
                     continue
 
-                signkey = signcert.get_pubkey()
-                if ek509.verify(signkey) == 1:
-                    logger.debug("EK cert matched cert: %s" % cert)
-                    return True
+                try:
+                    signcert.public_key().verify(
+                        ek509.signature,
+                        ek509.tbs_certificate_bytes,
+                        padding.PKCS1v15(),
+                        ek509.signature_hash_algorithm,
+                    )
+                except crypto_exceptions.InvalidSignature:
+                    continue
+
+                logger.debug("EK cert matched cert: %s" % cert)
+                return True
         except Exception as e:
             # Log the exception so we don't lose the raw message
             logger.exception(e)
@@ -1071,13 +1093,18 @@ class tpm(tpm_abstract.AbstractTPM):
 
         return retout, True
 
-    def check_quote(self, agentAttestState, nonce, data, quote, aikTpmFromRegistrar, tpm_policy={}, ima_measurement_list=None, allowlist={}, hash_alg=None, ima_keyring=None, mb_measurement_list=None, mb_refstate=None):
+    def check_quote(self, agentAttestState, nonce, data, quote, aikTpmFromRegistrar, tpm_policy={},
+                    ima_measurement_list=None, allowlist={}, hash_alg=None, ima_keyrings=None,
+                    mb_measurement_list=None, mb_refstate=None) -> Failure:
+        failure = Failure(Component.QUOTE_VALIDATION)
         if hash_alg is None:
             hash_alg = self.defaults['hash']
 
         retout, success = self._tpm2_checkquote(aikTpmFromRegistrar, quote, nonce, hash_alg)
         if not success:
-            return success
+            # If the quote validation fails we will skip all other steps therefore this failure is irrecoverable.
+            failure.add_event("quote_validation", {"message": "Quote validation using tpm2-tools", "data": retout}, False)
+            return failure
 
         pcrs = []
         jsonout = config.yaml_to_dict(retout)
@@ -1097,7 +1124,7 @@ class tpm(tpm_abstract.AbstractTPM):
         if len(pcrs) == 0:
             pcrs = None
 
-        return self.check_pcrs(agentAttestState, tpm_policy, pcrs, data, False, ima_measurement_list, allowlist, ima_keyring, mb_measurement_list, mb_refstate)
+        return self.check_pcrs(agentAttestState, tpm_policy, pcrs, data, False, ima_measurement_list, allowlist, ima_keyrings, mb_measurement_list, mb_refstate)
 
     def sim_extend(self, hashval_1, hashval_0=None):
         # simulate extending a PCR value by performing TPM-specific extend procedure
@@ -1264,41 +1291,44 @@ class tpm(tpm_abstract.AbstractTPM):
         log['pcrs'] = new_pcrs
         return
 
-    def __add_boot_aggregate(self, tssevent_output: list, log: dict) -> None :
-        '''
-        Parses the output of `tsseventextend` and add it to log fed by the output
-        `tpm2_eventlog`
-        '''
-        _hash_alg = None
-        _boot_agg = None
+    def __add_boot_aggregate(self, log: dict) -> None :
+        '''Scan the boot event log and calculate possible boot aggregates.
+
+        Hashes are calculated for both sha1 and sha256,
+        as well as for 8 or 10 participant PCRs.
+
+        Technically the sha1/10PCR combination is unnecessary, since it has no
+        implementation.
+
+        Error conditions caused by improper string formatting etc. are
+        ignored. The current assumption is that the boot event log PCR
+        values are in decimal encoding, but this is liable to change.'''
+        if (not isinstance(log, dict)) or 'pcrs' not in log:
+            return
         log['boot_aggregates'] = {}
-        for _entry in tssevent_output :
-            for _line in _entry['retout'] :
-                _line = _line.decode('utf-8')
-                if _line.count("algorithmId") :
-                    _hash_alg = _line.split('_')[-1].replace('\n','').lower()
-                if _hash_alg and _hash_alg not in log['boot_aggregates'] :
-                    log['boot_aggregates'][_hash_alg] = []
-                if _line.count("boot aggregate") :
-                    _boot_agg = _line.split(':')[-1].replace('\n','').replace(' ', '')
-                if _boot_agg and _boot_agg not in log['boot_aggregates'][_hash_alg] :
-                    log['boot_aggregates'][_hash_alg].append(_boot_agg)
-                    _boot_agg = None
+        for hashalg in log['pcrs'].keys():
+            log['boot_aggregates'][hashalg] = []
+            for maxpcr in [8,10]:
+                try:
+                    hashclass = getattr(hashlib,hashalg)
+                    h = hashclass()
+                    for pcrno in range(0,maxpcr):
+                        pcrstrg=log['pcrs'][hashalg][str(pcrno)]
+                        pcrhex= '{0:0{1}x}'.format(pcrstrg, h.digest_size*2)
+                        h.update(bytes.fromhex(pcrhex))
+                    log['boot_aggregates'][hashalg].append(h.hexdigest())
+                except Exception:
+                    pass
 
     def parse_binary_bootlog(self, log_bin:bytes) -> dict:
         '''Parse and enrich a BIOS boot log
 
         The input is the binary log.
         The output is the result of parsing and applying other conveniences.'''
-        retDict_tss = []
         with tempfile.NamedTemporaryFile() as log_bin_file:
             log_bin_file.write(log_bin)
             log_bin_filename = log_bin_file.name
             retDict_tpm2 = self.__run(['tpm2_eventlog', '--eventlog-version=2', log_bin_filename])
-            # Unfortunately, in order to acommodate older kernels and older versions of grub (mixed)
-            # we are required to calculate boot aggregates taking into account PCRs 0-7 and 0-9
-            for pcrno in [ "7", "9" ] :
-                retDict_tss.append(self.__run(['tsseventextend', '-sim', '-if',  log_bin_filename, '-pcrmax', pcrno]))
         log_parsed_strs = retDict_tpm2['retout']
         log_parsed_data = config.yaml_to_dict(log_parsed_strs, add_newlines=False)
         #pylint: disable=import-outside-toplevel
@@ -1310,7 +1340,7 @@ class tpm(tpm_abstract.AbstractTPM):
         #pylint: enable=import-outside-toplevel
         tpm_bootlog_enrich.enrich(log_parsed_data)
         self.__stringify_pcr_keys(log_parsed_data)
-        self.__add_boot_aggregate(retDict_tss, log_parsed_data)
+        self.__add_boot_aggregate(log_parsed_data)
         return log_parsed_data
 
     def _parse_mb_bootlog(self, log_b64:str) -> dict:
@@ -1321,30 +1351,35 @@ class tpm(tpm_abstract.AbstractTPM):
         log_bin = base64.b64decode(log_b64, validate=True)
         return self.parse_binary_bootlog(log_bin)
 
-    def parse_mb_bootlog(self, mb_measurement_list:str) -> dict:
+    def parse_mb_bootlog(self, mb_measurement_list: str) -> typing.Tuple[dict, typing.Optional[dict], dict, Failure]:
         """ Parse the measured boot log and return its object and the state of the SHA256 PCRs
         :param mb_measurement_list: The measured boot measurement list
         :returns: Returns a map of the state of the SHA256 PCRs, measured boot data object and True for success
                   and False in case an error occurred
         """
+        failure = Failure(Component.MEASURED_BOOT, ["parser"])
         if mb_measurement_list:
+            #TODO add tagging for _parse_mb_bootlog
             mb_measurement_data = self._parse_mb_bootlog(mb_measurement_list)
             if not mb_measurement_data:
                 logger.error("Unable to parse measured boot event log. Check previous messages for a reason for error.")
-                return {}, None, {}, False
+                return {}, None, {}, failure
             log_pcrs = mb_measurement_data.get('pcrs')
             if not isinstance(log_pcrs, dict):
                 logger.error("Parse of measured boot event log has unexpected value for .pcrs: %r", log_pcrs)
-                return {}, None, {}, False
+                failure.add_event("invalid_pcrs", {"got": log_pcrs}, True)
+                return {}, None, {}, failure
             pcrs_sha256 = log_pcrs.get('sha256')
             if (not isinstance(pcrs_sha256, dict)) or not pcrs_sha256:
                 logger.error("Parse of measured boot event log has unexpected value for .pcrs.sha256: %r", pcrs_sha256)
-                return {}, None, {}, False
+                failure.add_event("invalid_pcrs_sha256", {"got": pcrs_sha256}, True)
+                return {}, None, {}, failure
             boot_aggregates = mb_measurement_data.get('boot_aggregates')
             if (not isinstance(boot_aggregates, dict)) or not boot_aggregates:
                 logger.error("Parse of measured boot event log has unexpected value for .boot_aggragtes: %r", boot_aggregates)
-                return {}, None, {}, False
+                failure.add_event("invalid_boot_aggregates", {"got": boot_aggregates}, True)
+                return {}, None, {}, failure
 
-            return pcrs_sha256, boot_aggregates, mb_measurement_data, True
+            return pcrs_sha256, boot_aggregates, mb_measurement_data, failure
 
-        return {}, None, {}, True
+        return {}, None, {}, failure

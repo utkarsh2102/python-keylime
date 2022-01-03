@@ -16,7 +16,9 @@ import abc
 import dataclasses
 
 from typing import Dict, Callable, Any, Optional
+from keylime import config
 from keylime import keylime_logging
+from keylime.failure import Failure, Component
 
 logger = keylime_logging.init_logging("ima")
 
@@ -39,7 +41,9 @@ class Validator:
         validator = self.functions.get(class_type, None)
         if validator is None:
             logger.warning(f"No validator was implemented for: {class_type} . Using always false validator!")
-            return lambda *_: False
+            failure = Failure(Component.IMA, ["validation"])
+            failure.add_event("no_validator", f"No validator was implemented for: {class_type} . Using always false validator!", True)
+            return lambda *_: failure
         return validator
 
 
@@ -85,6 +89,17 @@ class Signature(HexData):
     """
     Class for type "sig".
     """
+    def __init__(self, data: str):
+        super().__init__(data)
+        # basic checks on signature
+        fmt = '>BBBIH'
+        hdrlen = struct.calcsize(fmt)
+        if len(self.data) < hdrlen:
+            raise ParserError("Invalid signature: header too short")
+        _, _, _, _, sig_size = struct.unpack(fmt, self.data[:hdrlen])
+
+        if hdrlen + sig_size != len(self.data):
+            raise ParserError("Invalid signature: malformed header")
 
 
 class Buffer(HexData):
@@ -220,14 +235,33 @@ class ImaSig(Mode):
 
     def __init__(self, data: str):
         tokens = data.split(maxsplit=4)
-        if len(tokens) in [2, 3]:
+        num_tokens = len(tokens)
+        if num_tokens == 2:
             self.digest = Digest(tokens[0])
             self.path = Name(tokens[1])
-        else:
+        elif num_tokens <= 1:
             raise ParserError(f"Cannot create ImaSig expected 2 or 3 tokens got: {len(tokens)}.")
+        else:
+            self.digest = Digest(tokens[0])
+            signature = self.create_Signature(tokens[-1])
+            if signature:
+                self.signature = signature
+                if num_tokens == 3:
+                    self.path = Name(tokens[1])
+                else:
+                    # first part of data is digest , last is signature, in between is path
+                    self.path = data.split(maxsplit=1)[1].rsplit(maxsplit=1)[0]
+            else:
+                # first part is data, last part is path
+                self.path = data.split(maxsplit=1)[1]
 
-        if len(tokens) == 3:
-            self.signature = Signature(tokens[2])
+    def create_Signature(self, hexstring):
+        """ Create the Signature object if the hexstring is a valid signature """
+        try:
+            return Signature(hexstring)
+        except ParserError:
+            pass
+        return None
 
     def hash(self):
         tohash = self.digest.struct() + self.path.struct()
@@ -299,20 +333,34 @@ class Entry:
             raise ParserError(f"No parser for mode {tokens[2]} implemented.")
         self.mode = mode(tokens[3])
 
-        # Ignore time of measure, time of use (ToMToU) errors and if a file is already opened for write.
-        # TODO make this configurable
+        # Set correct hash for time of measure, time of use (ToMToU) errors
+        # and if a file is already opened for write.
         # https://elixir.bootlin.com/linux/v5.12.12/source/security/integrity/ima/ima_main.c#L101
         if self.template_hash == START_HASH:
             self.template_hash = FF_HASH
 
-    def valid(self):
+    def invalid(self):
+        failure = Failure(Component.IMA, ["validation"])
+        if self.pcr != str(config.IMA_PCR):
+            logger.warning(f"IMA entry PCR does not match {config.IMA_PCR}. It was: {self.pcr}")
+            failure.add_event("ima_pcr", {"message": "IMA PCR is not the configured one",
+                                          "expected": str(config.IMA_PCR), "got": self.pcr}, True)
+
         # Ignore template hash for ToMToU errors
         if self.template_hash == FF_HASH:
             logger.warning("Skipped template_hash validation entry with FF_HASH")
-            return self.mode.is_data_valid(self.validator)
+            # By default ToMToU errors are not treated as a failure
+            if config.getboolean("cloud_verifier", "tomtou_errors", False):
+                failure.add_event("tomtou", "hash validation was skipped", True)
+            return failure
         if self.template_hash != self.mode.hash():
-            return False
+            failure.add_event("ima_hash",
+                              {"message": "IMA hash does not match the calculated hash.",
+                               "expected": self.template_hash, "got": self.mode.hash()}, True)
+            return failure
         if self.validator is None:
-            return False
+            failure.add_event("no_validator", "No validator specified", True)
+            return failure
 
-        return self.mode.is_data_valid(self.validator)
+        failure.merge(self.mode.is_data_valid(self.validator))
+        return failure
