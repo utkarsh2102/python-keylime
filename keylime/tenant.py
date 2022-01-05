@@ -167,14 +167,14 @@ class Tenant():
                     int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
 
             # Add all IMA file signing verification keys to a keyring
-            ima_keyring = ima_file_signatures.ImaKeyring()
+            tenant_keyring = ima_file_signatures.ImaKeyring()
             for filename in args["ima_sign_verification_keys"]:
                 pubkey, keyidv2 = ima_file_signatures.get_pubkey_from_file(filename)
                 if not pubkey:
                     raise UserError(
                         "File '%s' is not a file with a key" % filename)
-                ima_keyring.add_pubkey(pubkey, keyidv2)
-            self.ima_sign_verification_keys = ima_keyring.to_string()
+                tenant_keyring.add_pubkey(pubkey, keyidv2)
+            self.ima_sign_verification_keys = tenant_keyring.to_string()
 
         # Read command-line path string allowlist
         al_data = None
@@ -507,7 +507,8 @@ class Tenant():
             logger.warning("AIK not found in registrar, quote not validated")
             return False
 
-        if not self.tpm_instance.check_quote(AgentAttestState(self.agent_uuid), self.nonce, public_key, quote, reg_data['aik_tpm'], hash_alg=hash_alg):
+        failure = self.tpm_instance.check_quote(AgentAttestState(self.agent_uuid), self.nonce, public_key, quote, reg_data['aik_tpm'], hash_alg=hash_alg)
+        if failure:
             if reg_data['regcount'] > 1:
                 logger.error("WARNING: This UUID had more than one ek-ekcert registered to it! This might indicate that your system is misconfigured or a malicious host is present. Run 'regdelete' for this agent and restart")
                 sys.exit()
@@ -613,80 +614,140 @@ class Tenant():
             logger.error("POST command response: %s Unexpected response from Cloud Verifier: %s", response.status_code, response.text)
             sys.exit()
 
-    def do_cvstatus(self, listing=False, returnresponse=False, bulk=False):
-        """ Perform opertional state look up for agent
+    def do_cvstatus(self):
+        """Perform operational state look up for agent"""
 
-        Keyword Arguments:
-            listing {bool} -- If True, list all agent statues (default: {False})
-        """
-        agent_uuid = ""
-        if not listing:
-            agent_uuid = self.agent_uuid
-
-        response = None
         do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
-        if listing and (self.verifier_id is not None):
-            verifier_id = self.verifier_id
-            response = do_cvstatus.get(
-                (f'/v{self.api_version}/agents/?verifier={verifier_id}'),
-                cert=self.cert,
-                verify=False
-            )
-        elif (not listing) and (bulk):
-            verifier_id = ""
-            if self.verifier_id is not None:
-                verifier_id = self.verifier_id
-            response = do_cvstatus.get(
-                (f'/v{self.api_version}/agents/?bulk={bulk}&verifier={verifier_id}'),
-                cert=self.cert,
-                verify=False
-            )
-        else:
-            response = do_cvstatus.get(
-                (f'/v{self.api_version}/agents/{agent_uuid}'),
-                cert=self.cert,
-                verify=False
-            )
+
+        response = do_cvstatus.get(
+            (f'/v{self.api_version}/agents/{self.agent_uuid}'),
+            cert=self.cert,
+            verify=False
+        )
 
         if response.status_code == 503:
             logger.error("Cannot connect to Verifier at %s with Port %s. Connection refused.", self.verifier_ip, self.verifier_port)
-            sys.exit()
-        elif response == 504:
+            return response.json()
+        if response.status_code == 504:
             logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
-            sys.exit()
-
+            return response.json()
         if response.status_code == 404:
-            logger.error("Agent %s does not exist on the verifier. Please try to add or update agent", agent_uuid)
-            sys.exit()
+            logger.info("Verifier at %s with Port %s does not have agent %s.",
+                        self.verifier_ip, self.verifier_port, self.agent_uuid)
+            return response.json()
+        if response.status_code == 200:
+            response = response.json()
 
-        if response.status_code != 200:
-            logger.error("Status command response: %s. Unexpected response from Cloud Verifier.", response.status_code)
-            sys.exit()
-        else:
-            response_json = response.json()
-            if not returnresponse:
-                if not listing:
-                    if not bulk:
-                        operational_state = response_json["results"]["operational_state"]
-                        logger.info('Agent Status: "%s"', states.state_to_str(operational_state))
-                    else:
-                        for agent in response_json["results"].keys():
-                            response_json["results"][agent]["operational_state"] = states.state_to_str(response_json["results"][agent]["operational_state"])
-                        logger.info("Bulk Agent Info:\n%s" % json.dumps(response_json["results"]))
-                else:
-                    agent_array = response_json["results"]["uuids"]
-                    logger.info('Agents: "%s"', agent_array)
-            else:
-                return response_json["results"]
+            res = response.pop('results')
+            response['results'] = {self.agent_uuid: res}
 
-        return None
+            operational_state = states.state_to_str(
+                response['results'][self.agent_uuid]['operational_state'])
+            response['results'][self.agent_uuid]['operational_state'] = operational_state
+
+            logger.info("Agent Info:\n%s" % json.dumps(response["results"]))
+
+            return response
+
+        logger.info("Status command response: %s. Unexpected response "
+                    "from Cloud Verifier %s on port %s. %s",
+                    response.status_code,
+                    self.verifier_ip, self.verifier_port, str(response))
+        return response
+
+    def do_cvlist(self):
+        """List all agent statues in cloudverifier"""
+
+        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        verifier_id = ""
+        if self.verifier_id is not None:
+            verifier_id = self.verifier_id
+        response = do_cvstatus.get(
+            (f'/v{self.api_version}/agents/?verifier={verifier_id}'),
+            cert=self.cert,
+            verify=False
+        )
+
+        if response.status_code == 503:
+            logger.error("Cannot connect to Verifier at %s with Port %s. Connection refused.", self.verifier_ip, self.verifier_port)
+            return response.json()
+        if response.status_code == 504:
+            logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
+            return response.json()
+        if response.status_code == 404:
+            logger.info("Verifier at %s with Port %s does not have agent %s.",
+                        self.verifier_ip, self.verifier_port, self.agent_uuid)
+            return response.json()
+        if response.status_code == 200:
+            response = response.json()
+
+            logger.info('From verifier %s port %s retrieved: "%s"',
+                        self.verifier_ip, self.verifier_port, response)
+
+            return response
+
+        logger.info("Status command response: %s. Unexpected response "
+                    "from Cloud Verifier %s on port %s. %s",
+                    response.status_code,
+                    self.verifier_ip, self.verifier_port, str(response))
+        return response
+
+    def do_cvbulkinfo(self):
+        """Perform operational state look up for agent"""
+
+        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
+
+        verifier_id = ""
+        if self.verifier_id is not None:
+            verifier_id = self.verifier_id
+        response = do_cvstatus.get(
+            (f'/v{self.api_version}/agents/?bulk={True}&verifier={verifier_id}'),
+            cert=self.cert,
+            verify=False
+        )
+
+        if response.status_code == 503:
+            logger.error("Cannot connect to Verifier at %s with Port %s. Connection refused.", self.verifier_ip, self.verifier_port)
+            return response.json()
+        if response.status_code == 504:
+            logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
+            return response.json()
+        if response.status_code == 404:
+            logger.info("Verifier at %s with Port %s does not have agent %s.",
+                        self.verifier_ip, self.verifier_port, self.agent_uuid)
+            return response.json()
+        if response.status_code == 200:
+            response = response.json()
+
+            for agent in response["results"].keys():
+                response["results"][agent]["operational_state"] = \
+                    states.state_to_str(response["results"][agent][
+                                            "operational_state"])
+            logger.info("Bulk Agent Info:\n%s" % json.dumps(response["results"]))
+
+            return response
+
+        logger.info("Status command response: %s. Unexpected response "
+                    "from Cloud Verifier %s on port %s. %s",
+                    response.status_code,
+                    self.verifier_ip, self.verifier_port, str(response))
+        return response
 
     def do_cvdelete(self, verifier_check=True):
         """Delete agent from Verifier."""
         if verifier_check:
-            agent_json = self.do_cvstatus(listing=False, returnresponse=True)
-            self.verifier_ip = agent_json["verifier_ip"]
-            self.verifier_port = agent_json["verifier_port"]
+            cvresponse = self.do_cvstatus()
+
+            if not isinstance(cvresponse, dict):
+                return cvresponse
+
+            if cvresponse['code'] != 200:
+                logger.error("Could not get status of agent %s from "
+                             "verifier %s.", self.agent_uuid, self.verifier_ip)
+                return cvresponse
+
+            self.verifier_ip = cvresponse['results'][self.agent_uuid]["verifier_ip"]
+            self.verifier_port = cvresponse['results'][self.agent_uuid]["verifier_port"]
 
         do_cvdelete = RequestsClient(self.verifier_base_url, self.tls_enabled)
         response = do_cvdelete.delete(
@@ -695,14 +756,15 @@ class Tenant():
             verify=False
         )
 
-        if response.status_code == 503:
-            logger.error("Cannot connect to Verifier at %s with Port %s. Connection refused.", self.verifier_ip, self.verifier_port)
-            sys.exit()
-        elif response.status_code == 504:
-            logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
-            sys.exit()
+        response = response.json()
 
-        if response.status_code == 202:
+        if response['code'] == 503:
+            logger.error("Cannot connect to Verifier at %s with Port %s. Connection refused.", self.verifier_ip, self.verifier_port)
+            return response
+        if response['code'] == 504:
+            logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
+            return response
+        if response['code'] == 202:
             deleted = False
             for _ in range(12):
                 get_cvdelete = RequestsClient(
@@ -719,35 +781,102 @@ class Tenant():
                 time.sleep(.4)
             if deleted:
                 logger.info("CV completed deletion of agent %s", self.agent_uuid)
-            else:
-                logger.error("Timed out waiting for delete of agent %s to complete at CV", self.agent_uuid)
-                sys.exit()
-        elif response.status_code == 200:
+                return response.json()
+            logger.error("Timed out waiting for delete of agent %s to complete at CV", self.agent_uuid)
+            return response.json()
+        if response['code'] == 200:
             logger.info("Agent %s deleted from the CV", self.agent_uuid)
-        else:
-            response_body = response.json()
-            keylime_logging.log_http_response(
-                logger, logging.ERROR, response_body)
+            return response
+
+        keylime_logging.log_http_response(
+            logger, logging.ERROR, response)
+        return response
+
+    def do_regstatus(self):
+        registrar_client.init_client_tls('tenant')
+        agent_info = registrar_client.getData(self.registrar_ip,
+                                              self.registrar_port,
+                                              self.agent_uuid)
+
+        if not agent_info:
+            logger.info(
+                "Agent %s does not exist on the registrar. Please register the agent with the registrar.",
+                self.agent_uuid)
+            response = {}
+            response['code'] = 404
+            response['status'] = "Agent {0} does not exist on " \
+                                 "registrar {1} port {2}.".format(
+                self.agent_uuid, self.registrar_ip, self.registrar_port)
+            response['results'] = {}
+            logger.info(json.dumps((response)))
+            return response
+
+        response = {}
+        response['code'] = 200
+        response['status'] = "Agent {0} exists on registrar {1} port {2}.".format(
+                self.agent_uuid, self.registrar_ip, self.registrar_port)
+        response['results'] = {}
+        response['results'][self.agent_uuid] = agent_info
+        response['results'][self.agent_uuid]['operational_state'] = \
+            states.state_to_str(states.REGISTERED)
+
+        logger.info(json.dumps(response))
+
+        return response
 
     def do_reglist(self):
-        """List agents from Registrar
-        """
+        """List agents from Registrar"""
         registrar_client.init_client_tls('tenant')
         response = registrar_client.doRegistrarList(
             self.registrar_ip, self.registrar_port)
-        print(response)
+
+        logger.info("From registrar %s port %s retrieved %s",
+                    self.registrar_ip, self.registrar_port,
+                    json.dumps(response))
+        return response
 
     def do_regdelete(self):
-        """ Delete agent from Registrar
-        """
+        """Delete agent from Registrar"""
         registrar_client.init_client_tls('tenant')
-        registrar_client.doRegistrarDelete(
-            self.registrar_ip, self.registrar_port, self.agent_uuid)
+        response = registrar_client.doRegistrarDelete(self.registrar_ip,
+                                           self.registrar_port,
+                                           self.agent_uuid)
+
+        return response
+
+    def do_status(self):
+        """Perform operational state look up for agent"""
+
+        regresponse = self.do_regstatus()
+
+        if regresponse['code'] == 404:
+            return regresponse
+
+        cvresponse = self.do_cvstatus()
+
+        if not isinstance(cvresponse, dict):
+            logger.error("Unexpected response from Cloud Verifier %s on "
+                         "port %s. response %s", self.verifier_ip,
+                         self.verifier_port, str(cvresponse))
+            return cvresponse
+
+        if regresponse['code'] == 200 and cvresponse['code'] == 200:
+            return cvresponse
+        if regresponse['code'] == 200 and cvresponse['code'] != 200:
+            return regresponse
+
+        logger.error("Unknown inconsistent state between registrar %s on "
+                     "port %s and verifier %s on port %s occured. Got "
+                     "registrar response %s verifier response %s",
+                     self.verifier_ip, self.verifier_port, self.registrar_ip,
+                     self.registrar_port, str(regresponse), str(cvresponse))
+
+        return {'registrar': regresponse, 'verifier': cvresponse}
 
     def do_cvreactivate(self, verifier_check=True):
         """Reactive Agent."""
         if verifier_check:
-            agent_json = self.do_cvstatus(listing=False, returnresponse=True)
+            agent_json = self.do_status()
             self.verifier_ip = agent_json['verifier_ip']
             self.verifier_port = agent_json['verifier_port']
 
@@ -762,19 +891,19 @@ class Tenant():
 
         if response.status_code == 503:
             logger.error("Cannot connect to Verifier at %s with Port %s. Connection refused.", self.verifier_ip, self.verifier_port)
-            sys.exit()
-        elif response.status_code == 504:
+            return response.json()
+        if response.status_code == 504:
             logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
-            sys.exit()
+            return response.json()
+        if response.status_code == 200:
+            logger.info("Agent %s re-activated", self.agent_uuid)
+            return response.json()
 
         response_body = response.json()
-
-        if response.status_code != 200:
-            keylime_logging.log_http_response(
-                logger, logging.ERROR, response_body)
-            logger.error("Update command response: %s Unexpected response from Cloud Verifier.", response.status_code)
-        else:
-            logger.info("Agent %s re-activated", self.agent_uuid)
+        keylime_logging.log_http_response(
+            logger, logging.ERROR, response_body)
+        logger.error("Update command response: %s Unexpected response from Cloud Verifier.", response.status_code)
+        return response.json()
 
     def do_cvstop(self):
         """ Stop declared active agent
@@ -822,6 +951,7 @@ class Tenant():
                     params,
                     cert=self.cert
                 )
+                print(response)
                 response_body = response.json()
 
             except Exception as e:
@@ -921,7 +1051,7 @@ class Tenant():
                 keylime_logging.log_http_response(
                     logger, logging.ERROR, response_body)
                 raise UserError(
-                    "Posting of Encrypted U to the Cloud Agent failed with response code %d" % response.status)
+                    "Posting of Encrypted U to the Cloud Agent failed with response code %d (%s)" % (response.status_code, response.text))
         except Exception as e:
             self.do_cvstop()
             raise e
@@ -1028,7 +1158,10 @@ def main(argv=sys.argv):
     """
     parser = argparse.ArgumentParser(argv[0])
     parser.add_argument('-c', '--command', action='store', dest='command', default='add',
-                        help="valid commands are add,delete,update,status,list,reactivate,regdelete,bulkinfo. defaults to add")
+                        help="valid commands are add,delete,update,"
+                             "regstatus,cvstatus,status,reglist,cvlist,reactivate,"
+                             "regdelete,"
+                             "bulkinfo. defaults to add")
     parser.add_argument('-t', '--targethost', action='store',
                         dest='agent_ip', help="the IP address of the host to provision")
     parser.add_argument('-tp', '--targetport', action='store',
@@ -1151,7 +1284,7 @@ def main(argv=sys.argv):
     if args.registrar_port is not None:
         mytenant.registrar_port = args.registrar_port
 
-    # we only need to fetch remote files if we are adding or updateing
+    # we only need to fetch remote files if we are adding or updating
     if args.command in ['add', 'update']:
         delete_tmp_files = logger.level > logging.DEBUG # delete tmp files unless in DEBUG mode
 
@@ -1237,13 +1370,17 @@ def main(argv=sys.argv):
     elif args.command == 'delete':
         mytenant.do_cvdelete(args.verifier_check)
     elif args.command == 'status':
+        mytenant.do_status()
+    elif args.command == 'cvstatus':
         mytenant.do_cvstatus()
     elif args.command == 'bulkinfo':
-        mytenant.do_cvstatus(bulk=True)
-    elif args.command == 'list':
-        mytenant.do_cvstatus(listing=True)
+        mytenant.do_cvbulkinfo()
+    elif args.command == 'cvlist':
+        mytenant.do_cvlist()
     elif args.command == 'reactivate':
         mytenant.do_cvreactivate(args.verifier_check)
+    elif args.command == 'regstatus':
+        mytenant.do_regstatus()
     elif args.command == 'reglist':
         mytenant.do_reglist()
     elif args.command == 'regdelete':

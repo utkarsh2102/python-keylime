@@ -30,7 +30,7 @@ Last-Update: 2021-08-05
 +    import keylime.dataclasses as dataclasses
  
  from typing import Dict, Callable, Any, Optional
- from keylime import keylime_logging
+ from keylime import config
 --- /dev/null
 +++ b/keylime/dataclasses.py
 @@ -0,0 +1,1184 @@
