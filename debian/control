@@ -1,5 +1,6 @@
 Source: keylime
 Maintainer: Utkarsh Gupta <utkarsh.gupta@canonical.com>
+Uploaders: Thore Sommer <debian@thson.de>
 Section: python
 Priority: optional
 Build-Depends: debhelper (>= 11),

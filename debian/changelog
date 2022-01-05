@@ -1,11 +1,15 @@
 keylime (6.2.1-1) unstable; urgency=medium
 
+  [ Thore Sommer ]
   * New upstream version 6.2.1.
   * d/watch: adjust regex for newer versions.
   * d/p/using-ssl3.6-constant-for-TLSv12.patch:
     remove patch as it has been merged upstream.
   * d/p/embed-dataclasses-module.patch: refresh
     patch.
+
+  [ Utkarsh Gupta ]
+  * Add Thore Sommer as an uploader
 
  -- Thore Sommer <debian@thson.de>  Mon, 03 Jan 2022 20:10:00 +0100
 
