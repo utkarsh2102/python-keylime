@@ -14,8 +14,9 @@ override_dh_install:
 	dh_install
 
 override_dh_installdeb:
-	sed 's/@keylime_part@/server/' debian/python3-keylime.postinst.in > debian/python3-keylime-server.postinst
-	sed 's/@keylime_part@/agent/' debian/python3-keylime.postinst.in > debian/python3-keylime-agent.postinst
+	sed -e 's/@keylime_part@/server/' -e '/#KEYLIME_COMMON#/ r debian/common.postinst.in' debian/python3-keylime.postinst.in > debian/python3-keylime-server.postinst
+	sed -e 's/@keylime_part@/agent/' -e '/#KEYLIME_COMMON#/ r debian/common.postinst.in' debian/python3-keylime.postinst.in > debian/python3-keylime-agent.postinst
+	sed -e '/#KEYLIME_COMMON#/ r debian/common.postinst.in' debian/python3-keylime-defaultconf.postinst.in > debian/python3-keylime-defaultconf.postinst
 	sed 's/@keylime_part@/server/' debian/python3-keylime.postrm.in > debian/python3-keylime-server.postrm
 	sed 's/@keylime_part@/agent/' debian/python3-keylime.postrm.in > debian/python3-keylime-agent.postrm
 	dh_installdeb

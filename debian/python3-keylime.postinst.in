@@ -3,28 +3,12 @@
 set -e
 KEYLIME_PART=@keylime_part@
 
+#KEYLIME_COMMON#
+
 case "$1" in
     configure)
-    # creating tss group if he isn't already there
-    if ! getent group tss >/dev/null; then
-        addgroup --system tss
-    fi
-
-    # creating tss user if he isn't already there
-    if ! getent passwd tss >/dev/null; then
-        adduser --system --ingroup tss --shell /bin/false \
-                --home /var/lib/tpm --no-create-home \
-                --gecos "TPM software stack" \
-                tss
-    fi
-
-    # creating keylime user if he isn't already there
-    if ! getent passwd keylime >/dev/null; then
-        adduser --system --ingroup tss --shell /bin/false \
-                --home /var/lib/keylime --no-create-home \
-                --gecos "Keylime remote attestation" \
-                keylime
-    fi
+    # Setup the keylime user and the tss group
+    keylime_setup_group_user
 
     # Mark what part is installed
     touch "/var/lib/keylime/python3-keylime-${KEYLIME_PART}.installed"
