@@ -30,12 +30,12 @@ case "$1" in
     touch "/var/lib/keylime/python3-keylime-${KEYLIME_PART}.installed"
 
     # Setting owner
-    if [ -d /var/lib/keylime ] && getent passwd keylime >/dev/null; then
+    if [ -d /var/lib/keylime ] && ! dpkg-statoverride --list /var/lib/keylime >/dev/null && getent passwd keylime >/dev/null; then
         chown -R keylime:tss /var/lib/keylime
     fi
 
     # Setting owner of log dir of server
-    if [ "${KEYLIME_PART}" = "server" ] && [ -d /var/log/keylime ] && getent passwd keylime >/dev/null; then
+    if [ "${KEYLIME_PART}" = "server" ] && [ -d /var/log/keylime ] && ! dpkg-statoverride --list /var/log/keylime >/dev/null && getent passwd keylime >/dev/null; then
         chown keylime:tss /var/log/keylime
     fi
 

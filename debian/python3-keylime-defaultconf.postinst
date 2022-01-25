@@ -26,7 +26,7 @@ case "$1" in
     fi
 
     # Setting owner and file permissions
-    if [ -f /etc/keylime.conf ] && getent passwd keylime >/dev/null; then
+    if [ -f /etc/keylime.conf ] && ! dpkg-statoverride --list /etc/keylime.conf >/dev/null && getent passwd keylime >/dev/null; then
         chown -R keylime:tss /etc/keylime.conf
         chmod 600 /etc/keylime.conf
     fi
