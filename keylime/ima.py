@@ -3,7 +3,6 @@ SPDX-License-Identifier: Apache-2.0
 Copyright 2017 Massachusetts Institute of Technology.
 '''
 
-import ast
 import codecs
 import copy
 import hashlib
@@ -16,10 +15,11 @@ import functools
 
 from keylime import config
 from keylime import gpg
-from keylime import keylime_logging
 from keylime import ima_ast
-from keylime.agentstates import AgentAttestState
 from keylime import ima_file_signatures
+from keylime import keylime_logging
+from keylime.agentstates import AgentAttestState
+from keylime.common import algorithms, validators
 from keylime.failure import Failure, Component
 
 
@@ -27,7 +27,7 @@ logger = keylime_logging.init_logging('ima')
 
 
 # The version of the allowlist format that is supported by this keylime release
-ALLOWLIST_CURRENT_VERSION = 4
+ALLOWLIST_CURRENT_VERSION = 5
 
 
 class IMAMeasurementList:
@@ -204,9 +204,10 @@ def _validate_ima_buf(exclude_regex, allowlist, ima_keyrings: ima_file_signature
     return failure
 
 
-def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcrval=None, ima_keyrings=None, boot_aggregates=None):
+def _process_measurement_list(agentAttestState, lines, hash_alg, lists=None, m2w=None, pcrval=None, ima_keyrings=None,
+                              boot_aggregates=None):
     failure = Failure(Component.IMA)
-    running_hash = agentAttestState.get_pcr_state(config.IMA_PCR)
+    running_hash = agentAttestState.get_pcr_state(config.IMA_PCR, hash_alg)
     found_pcr = (pcrval is None)
     errors = {}
     pcrval_bytes = b''
@@ -215,12 +216,20 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
 
     if lists is not None:
         if isinstance(lists, str):
-            lists = ast.literal_eval(lists)
+            lists = json.loads(lists)
         allow_list = lists['allowlist']
         exclude_list = lists['exclude']
     else:
         allow_list = None
         exclude_list = None
+
+    ima_log_hash_alg = algorithms.Hash.SHA1
+    if allow_list is not None:
+        try:
+            ima_log_hash_alg = algorithms.Hash(allow_list["ima"]["log_hash_alg"])
+        except ValueError:
+            logger.warning("Specified IMA log hash algorithm %s is not a valid algorithm! Defaulting to SHA1.",
+                           allow_list["ima"]["log_hash_alg"])
 
     if boot_aggregates and allow_list:
         if 'boot_aggregate' not in allow_list['hashes'] :
@@ -230,7 +239,7 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
                 if val not in allow_list['hashes']['boot_aggregate'] :
                     allow_list['hashes']['boot_aggregate'].append(val)
 
-    is_valid, compiled_regex, err_msg = config.valid_exclude_list(exclude_list)
+    is_valid, compiled_regex, err_msg = validators.valid_exclude_list(exclude_list)
     if not is_valid:
         # This should not happen as the exclude list has already been validated
         # by the verifier before acceping it. This is a safety net just in case.
@@ -258,10 +267,10 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
             continue
 
         try:
-            entry = ima_ast.Entry(line, ima_validator)
+            entry = ima_ast.Entry(line, ima_validator, ima_hash_alg=ima_log_hash_alg, pcr_hash_alg=hash_alg)
 
             # update hash
-            running_hash = hashlib.sha1(running_hash + entry.template_hash).digest()
+            running_hash = hash_alg.hash(running_hash + entry.pcr_template_hash)
 
             validation_failure = entry.invalid()
 
@@ -280,7 +289,7 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
 
             # Keep old functionality for writing the parsed files with hashes into a file
             if m2w is not None and (type(entry.mode) in [ima_ast.Ima, ima_ast.ImaNg, ima_ast.ImaSig]):
-                hash_value = codecs.encode(entry.mode.digest.hash, "hex")
+                hash_value = codecs.encode(entry.mode.digest.bytes, "hex")
                 path = entry.mode.path.name
                 m2w.write(f"{hash_value} {path}\n")
         except ima_ast.ParserError:
@@ -301,10 +310,13 @@ def _process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcr
     return codecs.encode(running_hash, 'hex').decode('utf-8'), failure
 
 
-def process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcrval=None, ima_keyrings=None, boot_aggregates=None):
+def process_measurement_list(agentAttestState, lines, lists=None, m2w=None, pcrval=None, ima_keyrings=None,
+                             boot_aggregates=None, hash_alg=algorithms.Hash.SHA1):
     failure = Failure(Component.IMA)
     try:
-        running_hash, failure = _process_measurement_list(agentAttestState, lines, lists=lists, m2w=m2w, pcrval=pcrval, ima_keyrings=ima_keyrings, boot_aggregates=boot_aggregates)
+        running_hash, failure = _process_measurement_list(agentAttestState, lines, hash_alg, lists=lists, m2w=m2w,
+                                                          pcrval=pcrval, ima_keyrings=ima_keyrings,
+                                                          boot_aggregates=boot_aggregates)
     except:  # pylint: disable=try-except-raise
         raise
     finally:
@@ -329,6 +341,9 @@ def update_allowlist(allowlist):
     # version 4 added 'ima-buf'
     if "ima-buf" not in allowlist:
         allowlist["ima-buf"] = {}
+    # version 5 added 'log_hash_alg'
+    if not "log_hash_alg" in allowlist["ima"]:
+        allowlist["ima"]["log_hash_alg"] = "sha1"
 
     return allowlist
 
@@ -356,6 +371,13 @@ def process_allowlists(allowlist, exclude):
 
     return{'allowlist': allowlist, 'exclude': exclude}
 
+# IMA allowlists of versions older than 5 will not have the "log_hash_alg"
+# parameter. Hard-coding it to "sha1" is perfectly fine, and the fact one
+# specifies a different algorithm on the kernel command line (e.g., ima_hash=sha256)
+# does not affect normal operation of Keylime, since it does not validate the
+# hash algorithm received from agent's IMA runtime measurements.
+# The only situation where this hard-coding would become a problem is if and when
+# the kernel maintainers decide to use a different algorithm for template-hash.
 empty_allowlist = {
     "meta": {
         "version": ALLOWLIST_CURRENT_VERSION,
@@ -363,8 +385,9 @@ empty_allowlist = {
     "release": 0,
     "hashes": {},
     "keyrings": {},
-    "ima" : {
-        "ignored_keyrings": []
+    "ima": {
+        "ignored_keyrings": [],
+        "log_hash_alg": "sha1"
     }
 }
 

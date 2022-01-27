@@ -32,9 +32,9 @@ class VerfierMain(Base):
     tpm_policy = Column(JSONPickleType(pickler=JSONPickler))
     vtpm_policy = Column(JSONPickleType(pickler=JSONPickler))
     meta_data = Column(String(200))
-    allowlist = Column(Text(429400000))
-    ima_sign_verification_keys = Column(Text(429400000))
-    mb_refstate = Column(Text(429400000))
+    allowlist = Column(Text().with_variant(Text(429400000), "mysql"))
+    ima_sign_verification_keys = Column(Text().with_variant(Text(429400000), "mysql"))
+    mb_refstate = Column(Text().with_variant(Text(429400000), "mysql"))
     revocation_key = Column(String(2800))
     accept_tpm_hash_algs = Column(JSONPickleType(pickler=JSONPickler))
     accept_tpm_encryption_algs = Column(JSONPickleType(pickler=JSONPickler))
@@ -49,6 +49,9 @@ class VerfierMain(Base):
     severity_level = Column(Integer, nullable=True)
     last_event_id = Column(String(200), nullable=True)
     learned_ima_keyrings = Column(JSONPickleType(pickler=JSONPickler))
+    supported_version = Column(String(20))
+    ak_tpm = Column(String(500))
+    mtls_cert = Column(String(2048), nullable=True)
 
 
 class VerifierAllowlist(Base):
@@ -60,4 +63,4 @@ class VerifierAllowlist(Base):
     name = Column(String(255), nullable=False)
     tpm_policy = Column(Text())
     vtpm_policy = Column(Text())
-    ima_policy = Column(Text(429400000))
+    ima_policy = Column(Text().with_variant(Text(429400000), "mysql"))

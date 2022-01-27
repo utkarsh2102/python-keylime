@@ -34,7 +34,7 @@ from keylime import ima
 from keylime import crypto
 from keylime.cmd import user_data_encrypt
 from keylime import ca_util
-from keylime.common import algorithms
+from keylime.common import algorithms, validators
 from keylime import ima_file_signatures
 from keylime import measured_boot
 from keylime import gpg
@@ -62,6 +62,7 @@ class Tenant():
 
     registrar_ip = None
     registrar_port = None
+    registrar_data = None
 
     webapp_ip = None
     webapp_port = None
@@ -86,6 +87,7 @@ class Tenant():
     accept_tpm_encryption_algs = []
     accept_tpm_signing_algs = []
     mb_refstate = None
+    supported_version = None
 
     payload = None
 
@@ -109,8 +111,9 @@ class Tenant():
 
         self.api_version = keylime_api_version.current_version()
 
-        self.my_cert, self.my_priv_key = self.get_tls_context()
+        (self.my_cert, self.my_priv_key), (self.my_agent_cert, self.my_agent_priv_key) = self.get_tls_context()
         self.cert = (self.my_cert, self.my_priv_key)
+        self.agent_cert = (self.my_agent_cert, self.my_agent_priv_key)
         if config.getboolean('general', "enable_tls"):
             self.tls_enabled = True
         else:
@@ -145,7 +148,17 @@ class Tenant():
         my_cert = os.path.join(tls_dir, my_cert)
         my_priv_key = os.path.join(tls_dir, my_priv_key)
 
-        return my_cert, my_priv_key
+        tls_context = (my_cert, my_priv_key)
+
+        # Check for user defined CA to connect to agent
+        agent_mtls_cert = config.get("cloud_verifier", "agent_mtls_cert", fallback=None)
+        agent_mtls_private_key = config.get("cloud_verifier", "agent_mtls_private_key", fallback=None)
+
+        agent_mtls_context = tls_context
+        if agent_mtls_cert != "CV":
+            agent_mtls_context = (agent_mtls_cert, agent_mtls_private_key)
+
+        return tls_context, agent_mtls_context
 
     def process_allowlist(self, args):
         # Set up PCR values
@@ -253,19 +266,19 @@ class Tenant():
         if 'agent_port' in args and args['agent_port'] is not None:
             self.agent_port = args['agent_port']
 
-        # try to get the port or ip from the registrar if it is missing
-        if self.agent_ip is None or self.agent_port is None:
-            registrar_client.init_client_tls("tenant")
-            data = registrar_client.getData(self.registrar_ip, self.registrar_port, self.agent_uuid)
-            if data is not None:
-                if self.agent_ip is None:
-                    if data['ip'] is not None:
-                        self.agent_ip = data['ip']
-                    else:
-                        raise UserError("No Ip was specified or found in the Registrar")
+        registrar_client.init_client_tls("tenant")
+        self.registrar_data = registrar_client.getData(self.registrar_ip, self.registrar_port, self.agent_uuid)
 
-                if self.agent_port is None and data['port'] is not None:
-                    self.agent_port = data["port"]
+        # try to get the port or ip from the registrar if it is missing
+        if (self.agent_ip is None or self.agent_port is None) and self.registrar_data is not None:
+            if self.agent_ip is None:
+                if self.registrar_data['ip'] is not None:
+                    self.agent_ip = self.registrar_data['ip']
+                else:
+                    raise UserError("No Ip was specified or found in the Registrar")
+
+            if self.agent_port is None and self.registrar_data['port'] is not None:
+                self.agent_port = self.registrar_data["port"]
 
         # If no agent port was found try to use the default from the config file
         if self.agent_port is None:
@@ -277,6 +290,33 @@ class Tenant():
 
         if self.agent_port is None:
             raise UserError("The contact port for the agent was not specified.")
+
+        # Auto-detection for API version
+        self.supported_version = args["supported_version"]
+        if self.supported_version is None:
+            # Default to 1.0 if the agent did not send a mTLS certificate
+            if self.registrar_data.get("mtls_cert", None) is None:
+                self.supported_version = "1.0"
+            else:
+                # Try to connect to the agent to get supported version
+                with RequestsClient(f"{self.agent_ip}:{self.agent_port}", tls_enabled=True, cert=self.agent_cert,
+                                    ignore_hostname=True, verify_custom=self.registrar_data['mtls_cert']) as get_version:
+                    res = get_version.get("/version")
+                    if res and res.status_code == 200:
+                        try:
+                            data = res.json()
+                            api_version = data["results"]["supported_version"]
+                            if keylime_api_version.validate_version(api_version):
+                                self.supported_version = api_version
+                            else:
+                                logger.warning("API version provided by the agent is not valid")
+                        except (TypeError, KeyError):
+                            pass
+
+        if self.supported_version is None:
+            api_version = keylime_api_version.current_version()
+            logger.warning("Could not detect supported API version. Defaulting to %s", api_version)
+            self.supported_version = api_version
 
         # Now set the cv_agent_ip
         if 'cv_agent_ip' in args and args['cv_agent_ip'] is not None:
@@ -501,20 +541,20 @@ class Tenant():
             [type] -- [description]
         """
         registrar_client.init_client_tls('tenant')
-        reg_data = registrar_client.getData(
-            self.registrar_ip, self.registrar_port, self.agent_uuid)
-        if reg_data is None:
+        if self.registrar_data is None:
             logger.warning("AIK not found in registrar, quote not validated")
             return False
 
-        failure = self.tpm_instance.check_quote(AgentAttestState(self.agent_uuid), self.nonce, public_key, quote, reg_data['aik_tpm'], hash_alg=hash_alg)
+        failure = self.tpm_instance.check_quote(AgentAttestState(self.agent_uuid), self.nonce, public_key, quote,
+                                                self.registrar_data['aik_tpm'], hash_alg=hash_alg,
+                                                compressed=(self.supported_version == "1.0"))
         if failure:
-            if reg_data['regcount'] > 1:
+            if self.registrar_data['regcount'] > 1:
                 logger.error("WARNING: This UUID had more than one ek-ekcert registered to it! This might indicate that your system is misconfigured or a malicious host is present. Run 'regdelete' for this agent and restart")
                 sys.exit()
             return False
 
-        if reg_data['regcount'] > 1:
+        if self.registrar_data['regcount'] > 1:
             logger.warning("WARNING: This UUID had more than one ek-ekcert registered to it! This might indicate that your system is misconfigured. Run 'regdelete' for this agent and restart")
 
         if not config.STUB_TPM and (not config.getboolean('tenant', 'require_ek_cert') and config.get('tenant', 'ek_check_script') == ""):
@@ -522,11 +562,11 @@ class Tenant():
                 "DANGER: EK cert checking is disabled and no additional checks on EKs have been specified with ek_check_script option. Keylime is not secure!!")
 
         # check EK cert and make sure it matches EK
-        if not self.check_ek(reg_data['ekcert']):
+        if not self.check_ek(self.registrar_data['ekcert']):
             return False
         # if agent is virtual, check phyisical EK cert and make sure it matches phyiscal EK
-        if 'provider_keys' in reg_data:
-            if not self.check_ek(reg_data['provider_keys']['ekcert']):
+        if 'provider_keys' in self.registrar_data:
+            if not self.check_ek(self.registrar_data['provider_keys']['ekcert']):
                 return False
 
         # check all EKs with optional script:
@@ -542,18 +582,18 @@ class Tenant():
         env = os.environ.copy()
         env['AGENT_UUID'] = self.agent_uuid
         env['EK'] = tpm2_objects.pubkey_from_tpm2b_public(
-            base64.b64decode(reg_data['ek_tpm']),
+            base64.b64decode(self.registrar_data['ek_tpm']),
             ).public_bytes(
                 crypto_serialization.Encoding.PEM,
                 crypto_serialization.PublicFormat.SubjectPublicKeyInfo,
             )
-        env['EK_TPM'] = reg_data['ek_tpm']
-        if reg_data['ekcert'] is not None:
-            env['EK_CERT'] = reg_data['ekcert']
+        env['EK_TPM'] = self.registrar_data['ek_tpm']
+        if self.registrar_data['ekcert'] is not None:
+            env['EK_CERT'] = self.registrar_data['ekcert']
         else:
             env['EK_CERT'] = ""
 
-        env['PROVKEYS'] = json.dumps(reg_data.get('provider_keys', {}))
+        env['PROVKEYS'] = json.dumps(self.registrar_data.get('provider_keys', {}))
         proc = subprocess.Popen(script, env=env, shell=True,
                                 cwd=config.WORK_DIR, stdout=subprocess.PIPE,
                                 stderr=subprocess.STDOUT)
@@ -587,6 +627,7 @@ class Tenant():
             'accept_tpm_hash_algs': self.accept_tpm_hash_algs,
             'accept_tpm_encryption_algs': self.accept_tpm_encryption_algs,
             'accept_tpm_signing_algs': self.accept_tpm_signing_algs,
+            'supported_version': self.supported_version,
         }
         json_message = json.dumps(data)
         do_cv = RequestsClient(self.verifier_base_url, self.tls_enabled)
@@ -876,9 +917,9 @@ class Tenant():
     def do_cvreactivate(self, verifier_check=True):
         """Reactive Agent."""
         if verifier_check:
-            agent_json = self.do_status()
-            self.verifier_ip = agent_json['verifier_ip']
-            self.verifier_port = agent_json['verifier_port']
+            agent_json = self.do_cvstatus()
+            self.verifier_ip = agent_json['results'][self.agent_uuid]['verifier_ip']
+            self.verifier_port = agent_json['results'][self.agent_uuid]['verifier_port']
 
         do_cvreactivate = RequestsClient(
             self.verifier_base_url, self.tls_enabled)
@@ -944,13 +985,18 @@ class Tenant():
         # Note: We need a specific retry handler (perhaps in common), no point having localised unless we have too.
         while True:
             try:
-                params = f'/v{self.api_version}/quotes/identity?nonce=%s' % (self.nonce)
+                params = f'/v{self.supported_version}/quotes/identity?nonce=%s' % (self.nonce)
                 cloudagent_base_url = f'{self.agent_ip}:{self.agent_port}'
-                do_quote = RequestsClient(cloudagent_base_url, tls_enabled=False)
-                response = do_quote.get(
-                    params,
-                    cert=self.cert
-                )
+
+                if self.registrar_data['mtls_cert']:
+                    with RequestsClient(cloudagent_base_url, tls_enabled=True, ignore_hostname=True, cert=self.agent_cert,
+                                        verify_custom=self.registrar_data['mtls_cert']) as do_quote:
+                        response = do_quote.get(params)
+                else:
+                    logger.warning("Connecting to agent without using mTLS!")
+                    do_quote = RequestsClient(cloudagent_base_url, tls_enabled=False)
+                    response = do_quote.get(params)
+
                 print(response)
                 response_body = response.json()
 
@@ -988,7 +1034,8 @@ class Tenant():
             # Ensure hash_alg is in accept_tpm_hash_algs list
             hash_alg = response_body["results"]["hash_alg"]
             logger.debug("Agent_quote received hash algorithm: %s", hash_alg)
-            if not algorithms.is_accepted(hash_alg, config.get('tenant', 'accept_tpm_hash_algs').split(',')):
+            if not algorithms.is_accepted(hash_alg, config.get('tenant', 'accept_tpm_hash_algs').split(','))\
+                    or not algorithms.Hash.is_recognized(hash_alg):
                 raise UserError(
                     "TPM Quote is using an unaccepted hash algorithm: %s" % hash_alg)
 
@@ -1006,7 +1053,7 @@ class Tenant():
                 raise UserError(
                     "TPM Quote is using an unaccepted signing algorithm: %s" % sign_alg)
 
-            if not self.validate_tpm_quote(public_key, quote, hash_alg):
+            if not self.validate_tpm_quote(public_key, quote, algorithms.Hash(hash_alg)):
                 raise UserError(
                     "TPM Quote from cloud agent is invalid for nonce: %s" % self.nonce)
 
@@ -1026,19 +1073,21 @@ class Tenant():
             if self.payload is not None:
                 data['payload'] = self.payload.decode('utf-8')
 
-            u_json_message = json.dumps(data)
 
             # post encrypted U back to CloudAgent
-            params = f'/v{self.api_version}/keys/ukey'
+            params = f'/v{self.supported_version}/keys/ukey'
             cloudagent_base_url = (
                 f'{self.agent_ip}:{self.agent_port}'
             )
 
-            post_ukey = RequestsClient(cloudagent_base_url, tls_enabled=False)
-            response = post_ukey.post(
-                params,
-                data=u_json_message
-            )
+            if self.registrar_data['mtls_cert']:
+                with RequestsClient(cloudagent_base_url, tls_enabled=True, ignore_hostname=True, cert=self.agent_cert,
+                                    verify_custom=self.registrar_data['mtls_cert']) as post_ukey:
+                    response = post_ukey.post(params, json=data)
+            else:
+                logger.warning("Connecting to agent without using mTLS!")
+                post_ukey = RequestsClient(cloudagent_base_url, tls_enabled=False)
+                response = post_ukey.post(params, json=data)
 
             if response.status_code == 503:
                 logger.error("Cannot connect to Agent at %s with Port %s. Connection refused.", self.agent_ip, self.agent_port)
@@ -1066,13 +1115,17 @@ class Tenant():
                 cloudagent_base_url = (
                     f'{self.agent_ip}:{self.agent_port}'
                 )
-                do_verify = RequestsClient(
-                    cloudagent_base_url, tls_enabled=False)
-                response = do_verify.get(
-                    (f'/v{self.api_version}/keys/verify?challenge={challenge}'),
-                    cert=self.cert,
-                    verify=False
-                )
+
+
+                if self.registrar_data['mtls_cert']:
+                    with RequestsClient(cloudagent_base_url, tls_enabled=True, ignore_hostname=True,
+                                        cert=self.agent_cert, verify_custom=self.registrar_data['mtls_cert']) as do_verify:
+                        response = do_verify.get(f'/v{self.supported_version}/keys/verify?challenge={challenge}')
+                else:
+                    logger.warning("Connecting to agent without using mTLS!")
+                    do_verify = RequestsClient(cloudagent_base_url, tls_enabled=False)
+                    response = do_verify.get(f'/v{self.supported_version}/keys/verify?challenge={challenge}')
+
             except Exception as e:
                 if response.status_code in (503, 504):
                     numtries += 1
@@ -1138,6 +1191,7 @@ class Tenant():
                                  cert=self.cert, verify=False)
         print(f"Show allowlist command response: {response.status_code}.")
         print(response.json())
+
 
 def write_to_namedtempfile(data, delete_tmp_files):
     temp = tempfile.NamedTemporaryFile(prefix="keylime-", delete=delete_tmp_files)
@@ -1229,6 +1283,7 @@ def main(argv=sys.argv):
     parser.add_argument('--verify', action='store_true', default=False,
                         help='Block on cryptographically checked key derivation confirmation from the agent once it has been provisioned')
     parser.add_argument('--allowlist-name', help='The name of allowlist to operate with')
+    parser.add_argument('--supported-version', default=None, action="store", dest='supported_version', help='API version that is supported by the agent. Detected automatically by default')
 
     args = parser.parse_args(argv[1:])
 
@@ -1258,6 +1313,8 @@ def main(argv=sys.argv):
         if mytenant.agent_uuid.startswith('-----BEGIN PUBLIC KEY-----'):
             mytenant.agent_uuid = hashlib.sha256(
                 mytenant.agent_uuid).hexdigest()
+        if not validators.valid_agent_id(mytenant.agent_uuid):
+            raise UserError("The agent ID set via agent uuid parameter use invalid characters")
     else:
         logger.warning("Using default UUID d432fbb3-d2f1-4a97-9ef7-75bd81c00000")
         mytenant.agent_uuid = "d432fbb3-d2f1-4a97-9ef7-75bd81c00000"

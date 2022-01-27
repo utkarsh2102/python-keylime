@@ -5,24 +5,18 @@ Copyright 2017 Massachusetts Institute of Technology.
 
 import ast
 import base64
-import os
-import ssl
-import socket
 import time
-import sys
 
 from keylime import config
 from keylime import keylime_logging
-from keylime import registrar_client
 from keylime import crypto
-from keylime import ca_util
 from keylime import json
 from keylime import revocation_notifier
 from keylime.agentstates import AgentAttestStates
 from keylime.failure import Failure, Component
 from keylime.tpm.tpm_main import tpm
 from keylime.tpm.tpm_abstract import TPM_Utilities
-from keylime.common import algorithms
+from keylime.common import algorithms, validators
 from keylime import ima_file_signatures
 
 # setup logging
@@ -41,100 +35,6 @@ def get_tpm_instance():
 
 def get_AgentAttestStates():
     return AgentAttestStates.get_instance()
-
-
-def init_mtls(section='cloud_verifier', generatedir='cv_ca'):
-    if not config.getboolean('general', "enable_tls"):
-        logger.warning(
-            "Warning: TLS is currently disabled, keys will be sent in the clear! This should only be used for testing.")
-        return None
-
-    logger.info("Setting up TLS...")
-    my_cert = config.get(section, 'my_cert')
-    ca_cert = config.get(section, 'ca_cert')
-    my_priv_key = config.get(section, 'private_key')
-    my_key_pw = config.get(section, 'private_key_pw')
-    tls_dir = config.get(section, 'tls_dir')
-
-    if tls_dir == 'generate':
-        if my_cert != 'default' or my_priv_key != 'default' or ca_cert != 'default':
-            raise Exception(
-                "To use tls_dir=generate, options ca_cert, my_cert, and private_key must all be set to 'default'")
-
-        if generatedir[0] != '/':
-            generatedir = os.path.abspath(os.path.join(config.WORK_DIR,
-                                                       generatedir))
-        tls_dir = generatedir
-        ca_path = "%s/cacert.crt" % (tls_dir)
-        if os.path.exists(ca_path):
-            logger.info("Existing CA certificate found in %s, not generating a new one", tls_dir)
-        else:
-            logger.info("Generating a new CA in %s and a client certificate for connecting", tls_dir)
-            logger.info("use keylime_ca -d %s to manage this CA", tls_dir)
-            if not os.path.exists(tls_dir):
-                os.makedirs(tls_dir, 0o700)
-            if my_key_pw == 'default':
-                logger.warning("CAUTION: using default password for CA, please set private_key_pw to a strong password")
-            ca_util.setpassword(my_key_pw)
-            ca_util.cmd_init(tls_dir)
-            ca_util.cmd_mkcert(tls_dir, socket.gethostname())
-            ca_util.cmd_mkcert(tls_dir, 'client')
-
-    if tls_dir == 'CV':
-        if section != 'registrar':
-            raise Exception(
-                "You only use the CV option to tls_dir for the registrar not %s" % section)
-        tls_dir = os.path.abspath(os.path.join(config.WORK_DIR, 'cv_ca'))
-        if not os.path.exists("%s/cacert.crt" % (tls_dir)):
-            raise Exception(
-                "It appears that the verifier has not yet created a CA and certificates, please run the verifier first")
-
-    # if it is relative path, convert to absolute in WORK_DIR
-    if tls_dir[0] != '/':
-        tls_dir = os.path.abspath(os.path.join(config.WORK_DIR, tls_dir))
-
-    if ca_cert == 'default':
-        ca_path = os.path.join(tls_dir, "cacert.crt")
-    elif not os.path.isabs(ca_cert):
-        ca_path = os.path.join(tls_dir, ca_cert)
-    else:
-        ca_path = ca_cert
-
-    if my_cert == 'default':
-        my_cert = os.path.join(tls_dir, f"{socket.gethostname()}-cert.crt")
-    elif not os.path.isabs(my_cert):
-        my_cert = os.path.join(tls_dir, my_cert)
-    else:
-        pass
-
-    if my_priv_key == 'default':
-        my_priv_key = os.path.join(tls_dir,
-                                   f"{socket.gethostname()}-private.pem")
-    elif not os.path.isabs(my_priv_key):
-        my_priv_key = os.path.join(tls_dir, my_priv_key)
-
-    try:
-        context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-        if sys.version_info >= (3,7):
-            context.minimum_version = ssl.TLSVersion.TLSv1_2
-        else:
-            context.options &= ~ssl.OP_NO_TLSv1_2
-        context.load_verify_locations(cafile=ca_path)
-        context.load_cert_chain(
-            certfile=my_cert, keyfile=my_priv_key, password=my_key_pw)
-        if (config.has_option(section, 'check_client_cert')
-                and config.getboolean(section, 'check_client_cert')):
-            context.verify_mode = ssl.CERT_REQUIRED
-    except ssl.SSLError as exc:
-        if exc.reason == 'EE_KEY_TOO_SMALL':
-            logger.error('Higher key strength is required for keylime '
-                         'running on this system. If keylime is responsible '
-                         'to generate the certificate, please raise the value '
-                         'of configuration option [ca]cert_bits, remove '
-                         'generated certificate and re-run keylime service')
-        raise exc
-
-    return context
 
 
 def process_quote_response(agent, json_response, agentAttestState) -> Failure:
@@ -182,16 +82,6 @@ def process_quote_response(agent, json_response, agentAttestState) -> Failure:
         agent['provide_V'] = False
         received_public_key = agent['public_key']
 
-    if agent.get('registrar_data', "") == "":
-        registrar_client.init_client_tls('cloud_verifier')
-        registrar_data = registrar_client.getData(config.get("cloud_verifier", "registrar_ip"), config.get(
-            "cloud_verifier", "registrar_port"), agent['agent_id'])
-        if registrar_data is None:
-            logger.warning("AIK not found in registrar, quote not validated")
-            failure.add_event("no_aik", "AIK not found in registrar, quote not validated", False)
-            return failure
-        agent['registrar_data'] = registrar_data
-
     hash_alg = json_response.get('hash_alg')
     enc_alg = json_response.get('enc_alg')
     sign_alg = json_response.get('sign_alg')
@@ -202,7 +92,8 @@ def process_quote_response(agent, json_response, agentAttestState) -> Failure:
     agent['sign_alg'] = sign_alg
 
     # Ensure hash_alg is in accept_tpm_hash_alg list
-    if not algorithms.is_accepted(hash_alg, agent['accept_tpm_hash_algs']):
+    if not algorithms.is_accepted(hash_alg, agent['accept_tpm_hash_algs'])\
+            or not algorithms.Hash.is_recognized(hash_alg):
         logger.error(f"TPM Quote is using an unaccepted hash algorithm: {hash_alg}")
         failure.add_event("invalid_hash_alg",
                           {"message": f"TPM Quote is using an unaccepted hash algorithm: {hash_alg}", "data": hash_alg},
@@ -254,14 +145,15 @@ def process_quote_response(agent, json_response, agentAttestState) -> Failure:
         agent['nonce'],
         received_public_key,
         quote,
-        agent['registrar_data']['aik_tpm'],
+        agent['ak_tpm'],
         agent['tpm_policy'],
         ima_measurement_list,
         agent['allowlist'],
-        hash_alg,
+        algorithms.Hash(hash_alg),
         ima_keyrings,
         mb_measurement_list,
-        agent['mb_refstate'])
+        agent['mb_refstate'],
+        compressed=(agent['supported_version'] == "1.0"))  # TODO: change this to always False after initial update
     failure.merge(quote_validation_failure)
 
     if not failure:
@@ -297,8 +189,7 @@ def prepare_v(agent):
     post_data = {
         'encrypted_key': b64_encrypted_V
     }
-    v_json_message = json.dumps(post_data)
-    return v_json_message
+    return post_data
 
 
 def prepare_get_quote(agent):
@@ -322,14 +213,14 @@ def prepare_get_quote(agent):
 
 
 def process_get_status(agent):
-    allowlist = ast.literal_eval(agent.allowlist)
+    allowlist = json.loads(agent.allowlist)
     if isinstance(allowlist, dict) and 'allowlist' in allowlist:
         al_len = len(allowlist['allowlist'])
     else:
         al_len = 0
 
     try :
-        mb_refstate = ast.literal_eval(agent.mb_refstate)
+        mb_refstate = json.loads(agent.mb_refstate)
     except Exception as e:
         logger.warning('Non-fatal problem ocurred while attempting to evaluate agent attribute "mb_refstate" (%s). Will just consider the value of this attribute to be "None"', e.args)
         mb_refstate = None
@@ -368,7 +259,7 @@ def process_get_status(agent):
 
 def notify_error(agent, msgtype='revocation', event=None):
     send_mq = config.getboolean('cloud_verifier', 'revocation_notifier')
-    send_webhook = config.getboolean('cloud_verifier', 'revocation_notifier_webhook', False)
+    send_webhook = config.getboolean('cloud_verifier', 'revocation_notifier_webhook', fallback=False)
     if not (send_mq or send_webhook):
         return
 
@@ -409,7 +300,7 @@ def validate_agent_data(agent_data):
     lists = json.loads(agent_data['allowlist'])
 
     # Validate exlude list contains valid regular expressions
-    is_valid, _, err_msg = config.valid_exclude_list(lists.get('exclude'))
+    is_valid, _, err_msg = validators.valid_exclude_list(lists.get('exclude'))
     if not is_valid:
         err_msg += " Exclude list regex is misformatted. Please correct the issue and try again."
 
