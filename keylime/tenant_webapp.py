@@ -16,17 +16,18 @@ import tornado.ioloop
 import tornado.web
 
 from keylime.requests_client import RequestsClient
-from keylime.common import states
+from keylime.common import validators, states
 from keylime import config
 from keylime import json
 from keylime import keylime_logging
 from keylime import tenant
+from keylime import web_util
 from keylime import api_version as keylime_api_version
 
 
 logger = keylime_logging.init_logging('tenant_webapp')
 tenant_templ = tenant.Tenant()
-my_cert, my_priv_key = tenant_templ.get_tls_context()
+(my_cert, my_priv_key), agent_cert = tenant_templ.get_tls_context()
 cert = (my_cert, my_priv_key)
 if config.getboolean('general', "enable_tls"):
     tls_enabled = True
@@ -62,9 +63,9 @@ class BaseHandler(tornado.web.RequestHandler):
             lines = []
             for line in traceback.format_exception(*kwargs["exc_info"]):
                 lines.append(line)
-            config.echo_json_response(self, status_code, self._reason, lines)
+            web_util.echo_json_response(self, status_code, self._reason, lines)
         else:
-            config.echo_json_response(self, status_code, self._reason)
+            web_util.echo_json_response(self, status_code, self._reason)
 
     def data_received(self, chunk):
         raise NotImplementedError()
@@ -72,23 +73,23 @@ class BaseHandler(tornado.web.RequestHandler):
 
 class MainHandler(tornado.web.RequestHandler):
     def head(self):
-        config.echo_json_response(
+        web_util.echo_json_response(
             self, 405, "Not Implemented: Use /webapp/, /agents/ or /logs/ interface instead")
 
     def get(self):
-        config.echo_json_response(
+        web_util.echo_json_response(
             self, 405, "Not Implemented: Use /webapp/, /agents/ or /logs/  interface instead")
 
     def put(self):
-        config.echo_json_response(
+        web_util.echo_json_response(
             self, 405, "Not Implemented: Use /webapp/, /agents/ or /logs/  interface instead")
 
     def post(self):
-        config.echo_json_response(
+        web_util.echo_json_response(
             self, 405, "Not Implemented: Use /webapp/, /agents/ or /logs/  interface instead")
 
     def delete(self):
-        config.echo_json_response(
+        web_util.echo_json_response(
             self, 405, "Not Implemented: Use /webapp/, /agents/ or /logs/  interface instead")
 
     def data_received(self, chunk):
@@ -98,7 +99,7 @@ class MainHandler(tornado.web.RequestHandler):
 class WebAppHandler(BaseHandler):
     def head(self):
         """HEAD not supported"""
-        config.echo_json_response(self, 405, "HEAD not supported")
+        web_util.echo_json_response(self, 405, "HEAD not supported")
 
     def get(self):
         """This method handles the GET requests to retrieve status on agents for all agents in a Web-based GUI.
@@ -325,7 +326,7 @@ class WebAppHandler(BaseHandler):
 class AgentsHandler(BaseHandler):
     def head(self):
         """HEAD not supported"""
-        config.echo_json_response(self, 405, "HEAD not supported")
+        web_util.echo_json_response(self, 405, "HEAD not supported")
 
     async def get_agent_state(self, agent_id):
         try:
@@ -340,7 +341,7 @@ class AgentsHandler(BaseHandler):
             logger.error("Status command response: %s:%s Unexpected response from Cloud Verifier.",
                 tenant_templ.cloudverifier_ip, tenant_templ.cloudverifier_port)
             logger.exception(e)
-            config.echo_json_response(
+            web_util.echo_json_response(
                 self, 500, "Unexpected response from Cloud Verifier", str(e))
             logger.error("Unexpected response from Cloud Verifier: %s", e)
             return
@@ -370,9 +371,9 @@ class AgentsHandler(BaseHandler):
         will return errors.
         """
 
-        rest_params = config.get_restful_params(self.request.uri)
+        rest_params = web_util.get_restful_params(self.request.uri)
         if rest_params is None:
-            config.echo_json_response(
+            web_util.echo_json_response(
                 self, 405, "Not Implemented: Use /agents/ or /logs/ interface")
             return
 
@@ -383,22 +384,29 @@ class AgentsHandler(BaseHandler):
             # intercept requests for logs
             with open(keylime_logging.LOGSTREAM, encoding="utf-8") as f:
                 logValue = f.readlines()
-                config.echo_json_response(self, 200, "Success", {
+                web_util.echo_json_response(self, 200, "Success", {
                                           'log': logValue[offset:]})
             return
         if "agents" not in rest_params:
             # otherwise they must be looking for agent info
-            config.echo_json_response(self, 400, "uri not supported")
+            web_util.echo_json_response(self, 400, "uri not supported")
             logger.warning('GET returning 400 response. uri not supported: %s', self.request.path)
             return
 
         agent_id = rest_params["agents"]
         if agent_id is not None:
+            # If the agent ID is not valid (wrong set of characters),
+            # just do nothing.
+            if not validators.valid_agent_id(agent_id):
+                web_util.echo_json_response(self, 400, "agent_id not not valid")
+                logger.error("GET received an invalid agent ID: %s", agent_id)
+                return
+
             # Handle request for specific agent data separately
             agents = await self.get_agent_state(agent_id)
             agents["id"] = agent_id
 
-            config.echo_json_response(self, 200, "Success", agents)
+            web_util.echo_json_response(self, 200, "Success", agents)
             return
 
         # If no agent ID, get list of all agents from Registrar
@@ -414,7 +422,7 @@ class AgentsHandler(BaseHandler):
             logger.error("Status command response: %s:%s Unexpected response from Registrar.",
                 tenant_templ.registrar_ip, tenant_templ.registrar_port)
             logger.exception(e)
-            config.echo_json_response(
+            web_util.echo_json_response(
                 self, 500, "Unexpected response from Registrar", str(e))
             return
 
@@ -432,7 +440,7 @@ class AgentsHandler(BaseHandler):
 
         agent_list = response_body["results"]["uuids"]
 
-        config.echo_json_response(self, 200, "Success", {
+        web_util.echo_json_response(self, 200, "Success", {
                                   'uuids': agent_list})
 
     def delete(self):
@@ -442,25 +450,31 @@ class AgentsHandler(BaseHandler):
         agents requests require a single agent_id parameter which identifies the agent to be deleted.
         """
 
-        rest_params = config.get_restful_params(self.request.uri)
+        rest_params = web_util.get_restful_params(self.request.uri)
         if rest_params is None:
-            config.echo_json_response(
+            web_util.echo_json_response(
                 self, 405, "Not Implemented: Use /agents/ interface")
             return
 
         if "agents" not in rest_params:
-            config.echo_json_response(self, 400, "uri not supported")
+            web_util.echo_json_response(self, 400, "uri not supported")
             logger.warning('DELETE returning 400 response. uri not supported: %s', self.request.path)
             return
 
         agent_id = rest_params["agents"]
+        # If the agent ID is not valid (wrong set of characters), just
+        # do nothing.
+        if not validators.valid_agent_id(agent_id):
+            web_util.echo_json_response(self, 400, "agent_id not not valid")
+            logger.error("DELETE received an invalid agent ID: %s", agent_id)
+            return
 
         # let Tenant do dirty work of deleting agent
         mytenant = tenant.Tenant()
         mytenant.agent_uuid = agent_id
         mytenant.do_cvdelete()
 
-        config.echo_json_response(self, 200, "Success")
+        web_util.echo_json_response(self, 200, "Success")
 
     def post(self):
         """This method handles the POST requests to add agents to the Cloud Verifier.
@@ -469,18 +483,24 @@ class AgentsHandler(BaseHandler):
         agents requests require a yaml block sent in the body
         """
 
-        rest_params = config.get_restful_params(self.request.uri)
+        rest_params = web_util.get_restful_params(self.request.uri)
         if rest_params is None:
-            config.echo_json_response(
+            web_util.echo_json_response(
                 self, 405, "Not Implemented: Use /agents/ interface")
             return
 
         if "agents" not in rest_params:
-            config.echo_json_response(self, 400, "uri not supported")
+            web_util.echo_json_response(self, 400, "uri not supported")
             logger.warning('POST returning 400 response. uri not supported: %s', self.request.path)
             return
 
         agent_id = rest_params["agents"]
+        # If the agent ID is not valid (wrong set of characters), just
+        # do nothing.
+        if not validators.valid_agent_id(agent_id):
+            web_util.echo_json_response(self, 400, "agent_id not not valid")
+            logger.error("POST received an invalid agent ID: %s", agent_id)
+            return
 
         # Parse payload files (base64 data-uri)
         if self.get_argument("ptype", Agent_Init_Types.FILE, True) == Agent_Init_Types.FILE:
@@ -515,7 +535,7 @@ class AgentsHandler(BaseHandler):
             if ca_dir_pw == "":
                 ca_dir_pw = 'default'
         else:
-            config.echo_json_response(self, 400, "invalid payload type chosen")
+            web_util.echo_json_response(self, 400, "invalid payload type chosen")
             logger.warning('POST returning 400 response. malformed query')
             return
 
@@ -569,10 +589,10 @@ class AgentsHandler(BaseHandler):
         except Exception as e:
             logger.exception(e)
             logger.warning('POST returning 500 response. Tenant error: %s', e)
-            config.echo_json_response(self, 500, "Request failure", str(e))
+            web_util.echo_json_response(self, 500, "Request failure", str(e))
             return
 
-        config.echo_json_response(self, 200, "Success")
+        web_util.echo_json_response(self, 200, "Success")
 
     def put(self):
         """This method handles the PUT requests to add agents to the Cloud Verifier.
@@ -580,25 +600,31 @@ class AgentsHandler(BaseHandler):
         Currently, only agents resources are available for PUTing, i.e. /agents. All other PUT uri's will return errors.
         """
 
-        rest_params = config.get_restful_params(self.request.uri)
+        rest_params = web_util.get_restful_params(self.request.uri)
         if rest_params is None:
-            config.echo_json_response(
+            web_util.echo_json_response(
                 self, 405, "Not Implemented: Use /agents/ interface")
             return
 
         if "agents" not in rest_params:
-            config.echo_json_response(self, 400, "uri not supported")
+            web_util.echo_json_response(self, 400, "uri not supported")
             logger.warning('PUT returning 400 response. uri not supported: %s', self.request.path)
             return
 
         agent_id = rest_params["agents"]
+        # If the agent ID is not valid (wrong set of characters), just
+        # do nothing.
+        if not validators.valid_agent_id(agent_id):
+            web_util.echo_json_response(self, 400, "agent_id not not valid")
+            logger.error("PUT received an invalid agent ID: %s", agent_id)
+            return
 
         # let Tenant do dirty work of reactivating agent
         mytenant = tenant.Tenant()
         mytenant.agent_uuid = agent_id
         mytenant.do_cvreactivate()
 
-        config.echo_json_response(self, 200, "Success")
+        web_util.echo_json_response(self, 200, "Success")
 
     def data_received(self, chunk):
         raise NotImplementedError()

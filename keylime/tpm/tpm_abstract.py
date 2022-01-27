@@ -2,9 +2,8 @@
 SPDX-License-Identifier: Apache-2.0
 Copyright 2017 Massachusetts Institute of Technology.
 '''
-
+import codecs
 from abc import ABCMeta, abstractmethod
-import hashlib
 import os
 import string
 import typing
@@ -77,6 +76,7 @@ class AbstractTPM(metaclass=ABCMeta):
     EXIT_SUCESS = 0
     TPM_IO_ERR = 5
     EMPTYMASK = "1"
+    MAX_NONCE_SIZE = 64
 
     # constructor
     def __init__(self, need_hw_tpm=True):
@@ -158,38 +158,31 @@ class AbstractTPM(metaclass=ABCMeta):
 
     # tpm_quote
     @abstractmethod
-    def create_quote(self, nonce, data=None, pcrmask=EMPTYMASK, hash_alg=None):
+    def create_quote(self, nonce, data=None, pcrmask=EMPTYMASK, hash_alg=None, compress=False):
         pass
 
     @abstractmethod
-    def check_quote(self, agentAttestState, nonce, data, quote, aikTpmFromRegistrar, tpm_policy={}, ima_measurement_list=None, allowlist={}, hash_alg=None, ima_keyrings=None, mb_measurement_list=None, mb_refstate=None):
+    def check_quote(self, agentAttestState, nonce, data, quote, aikTpmFromRegistrar, tpm_policy={}, ima_measurement_list=None, allowlist={}, hash_alg=None, ima_keyrings=None, mb_measurement_list=None, mb_refstate=None, compressed=False):
         pass
 
     def START_HASH(self, algorithm=None):
         if algorithm is None:
             algorithm = self.defaults['hash']
 
-        alg_size = algorithms.get_hash_size(algorithm) // 4
+        alg_size = algorithm.get_size() // 4
         return "0" * alg_size
 
     def hashdigest(self, payload, algorithm=None):
         if algorithm is None:
             algorithm = self.defaults['hash']
 
-        if algorithm == algorithms.Hash.SHA1:
-            measured = hashlib.sha1(payload).hexdigest()
-        elif algorithm == algorithms.Hash.SHA256:
-            measured = hashlib.sha256(payload).hexdigest()
-        elif algorithm == algorithms.Hash.SHA384:
-            measured = hashlib.sha384(payload).hexdigest()
-        elif algorithm == algorithms.Hash.SHA512:
-            measured = hashlib.sha512(payload).hexdigest()
-        else:
-            measured = None
-        return measured
+        digest = algorithm.hash(payload)
+        if digest is None:
+            return None
+        return codecs.encode(digest, 'hex').decode('utf-8')
 
     @abstractmethod
-    def sim_extend(self, hashval_1, hashval_0=None):
+    def sim_extend(self, hashval_1, hashval_0=None, hash_alg=None):
         pass
 
     @abstractmethod
@@ -204,7 +197,8 @@ class AbstractTPM(metaclass=ABCMeta):
     def _get_tpm_rand_block(self, size=4096):
         pass
 
-    def __check_ima(self, agentAttestState, pcrval, ima_measurement_list, allowlist, ima_keyrings, boot_aggregates):
+    def __check_ima(self, agentAttestState, pcrval, ima_measurement_list, allowlist,
+                    ima_keyrings, boot_aggregates, hash_alg):
         failure = Failure(Component.IMA)
         logger.info("Checking IMA measurement list on agent: %s", agentAttestState.get_agent_id())
         if config.STUB_IMA:
@@ -212,7 +206,7 @@ class AbstractTPM(metaclass=ABCMeta):
 
         _, ima_failure = ima.process_measurement_list(agentAttestState, ima_measurement_list.split('\n'), allowlist,
                                                       pcrval=pcrval, ima_keyrings=ima_keyrings,
-                                                      boot_aggregates=boot_aggregates)
+                                                      boot_aggregates=boot_aggregates, hash_alg=hash_alg)
         failure.merge(ima_failure)
         if not failure:
             logger.debug("IMA measurement list of agent %s validated", agentAttestState.get_agent_id())
@@ -236,7 +230,7 @@ class AbstractTPM(metaclass=ABCMeta):
         return output
 
     def check_pcrs(self, agentAttestState, tpm_policy, pcrs, data, virtual, ima_measurement_list,
-                   allowlist, ima_keyrings, mb_measurement_list, mb_refstate_str) -> Failure:
+                   allowlist, ima_keyrings, mb_measurement_list, mb_refstate_str, hash_alg) -> Failure:
         failure = Failure(Component.PCR_VALIDATION)
         if isinstance(tpm_policy, str):
             tpm_policy = json.loads(tpm_policy)
@@ -249,7 +243,7 @@ class AbstractTPM(metaclass=ABCMeta):
         pcr_allowlist = {int(k): v for k, v in list(pcr_allowlist.items())}
 
         mb_policy, mb_refstate_data = measured_boot.get_policy(mb_refstate_str)
-        mb_pcrs_sha256, boot_aggregates, mb_measurement_data, mb_failure = self.parse_mb_bootlog(mb_measurement_list)
+        mb_pcrs_hashes, boot_aggregates, mb_measurement_data, mb_failure = self.parse_mb_bootlog(mb_measurement_list, hash_alg)
         failure.merge(mb_failure)
 
         pcrs_in_quote = set()  # PCRs in quote that were already used for some kind of validation
@@ -263,7 +257,7 @@ class AbstractTPM(metaclass=ABCMeta):
 
         # Validate data PCR
         if config.TPM_DATA_PCR in pcr_nums and data is not None:
-            expectedval = self.sim_extend(data)
+            expectedval = self.sim_extend(data, hash_alg=hash_alg)
             if expectedval != pcrs[config.TPM_DATA_PCR]:
                 logger.error(
                     "%sPCR #%s: invalid bind data %s from quote does not match expected value %s",
@@ -280,8 +274,8 @@ class AbstractTPM(metaclass=ABCMeta):
                 logger.error("IMA PCR in policy, but no measurement list provided")
                 failure.add_event(f"unused_pcr_{config.IMA_PCR}", "IMA PCR in policy, but no measurement list provided", True)
             else:
-                ima_failure = self.__check_ima(agentAttestState, pcrs[config.IMA_PCR], ima_measurement_list, allowlist, ima_keyrings,
-                                        boot_aggregates)
+                ima_failure = self.__check_ima(agentAttestState, pcrs[config.IMA_PCR], ima_measurement_list, allowlist,
+                                               ima_keyrings, boot_aggregates, hash_alg)
                 failure.merge(ima_failure)
 
             pcrs_in_quote.add(config.IMA_PCR)
@@ -298,14 +292,14 @@ class AbstractTPM(metaclass=ABCMeta):
                                           f"Measured Boot PCR {pcr_num} in policy, but no measurement list provided", True)
                         continue
 
-                    val_from_log_int = mb_pcrs_sha256.get(str(pcr_num), 0)
+                    val_from_log_int = mb_pcrs_hashes.get(str(pcr_num), 0)
                     val_from_log_hex = hex(val_from_log_int)[2:]
                     val_from_log_hex_stripped = val_from_log_hex.lstrip('0')
                     pcrval_stripped = pcrs[pcr_num].lstrip('0')
                     if val_from_log_hex_stripped != pcrval_stripped:
                         logger.error(
-                            "For PCR %d and hash SHA256 the boot event log has value %r but the agent returned %r",
-                            pcr_num, val_from_log_hex, pcrs[pcr_num])
+                            "For PCR %d and hash %s the boot event log has value %r but the agent returned %r",
+                            str(hash_alg), pcr_num, val_from_log_hex, pcrs[pcr_num])
                         mb_pcr_failure.add_event(f"invalid_pcr_{pcr_num}",
                                                  {"context": "SHA256 boot event log PCR value does not match",
                                                   "got": pcrs[pcr_num], "expected": val_from_log_hex}, True)
@@ -357,5 +351,5 @@ class AbstractTPM(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def parse_mb_bootlog(self, mb_measurement_list:str) -> dict:
+    def parse_mb_bootlog(self, mb_measurement_list: str, hash_alg: algorithms.Hash) -> dict:
         raise NotImplementedError
