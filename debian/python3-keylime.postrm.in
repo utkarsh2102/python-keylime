@@ -22,8 +22,9 @@ if [ "$1" = "purge" ]; then
   fi
 
   if [ "${KEYLIME_PART}" = "server" ]; then
-    # Only the server uses the log directory
+    # Only the server uses the log and run directory
     rm -rf /var/log/keylime
+    rm -rf /var/run/keylime
     rm -rf "${KEYLIME_DIR}/cv_ca"
     for db in $(find ${KEYLIME_DIR} -name '*.sqlite'); do
       rm -rf ${db}

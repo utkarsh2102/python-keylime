@@ -3,6 +3,7 @@ keylime (6.3.0-1) unstable; urgency=medium
   [ Thore Sommer ]
   * New upstream version 6.3.0
   * drop dataclass patch
+  * add /var/run/keylime to server components
 
  -- Thore Sommer <debian@thson.de>  Thu, 27 Jan 2022 17:42:42 +0100
 
