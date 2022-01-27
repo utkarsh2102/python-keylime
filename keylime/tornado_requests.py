@@ -5,14 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 Copyright 2017 Massachusetts Institute of Technology.
 '''
 
-import json
-import yaml
-try:
-    from yaml import CSafeLoader as SafeLoader
-except ImportError:
-    from yaml import SafeLoader
+import ssl
 
 from tornado import httpclient
+
+from keylime import json
 
 
 async def request(method, url, params=None, data=None, context=None, headers=None):
@@ -27,6 +24,14 @@ async def request(method, url, params=None, data=None, context=None, headers=Non
     if context is not None:
         url = url.replace('http://', 'https://', 1)
 
+    # Convert dict to JSON before sending
+    if isinstance(data, dict):
+        data = json.dumps(data)
+        if headers is None:
+            headers = {}
+        if "Content-Type" not in headers:
+            headers["Content-Type"] = "application/json"
+
     try:
         req = httpclient.HTTPRequest(url=url,
                                      method=method,
@@ -37,40 +42,20 @@ async def request(method, url, params=None, data=None, context=None, headers=Non
 
     except httpclient.HTTPError as e:
         if e.response is None:
-            return tornado_response(500, str(e))
+            return TornadoResponse(500, str(e))
 
-        return tornado_response(e.response.code, e.response.body)
+        return TornadoResponse(e.response.code, e.response.body)
     except ConnectionError as e:
-        return tornado_response(599, "Connection error: %s" % e)
+        return TornadoResponse(599, "Connection error: %s" % e)
+    except ssl.SSLError as e:
+        return TornadoResponse(599, "SSL connection error: %s" % e)
     if response is None:
         return None
-    return tornado_response(response.code, response.body)
+    return TornadoResponse(response.code, response.body)
 
 
-def is_refused(e):
-    if hasattr(e, 'strerror'):
-        return "Connection refused" in e.strerror
-
-    return False
-
-
-class tornado_response():
+class TornadoResponse:
 
     def __init__(self, code, body):
         self.status_code = code
         self.body = body
-
-    def json(self):
-        try:
-            retval = json.loads(self.body)
-
-        except Exception as e:
-            retval = [self.body, str(e)]
-        return retval
-
-    def yaml(self):
-        try:
-            retval = yaml.load(self.body, Loader=SafeLoader)
-        except Exception as e:
-            retval = [self.body, str(e)]
-        return retval

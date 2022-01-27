@@ -2,24 +2,18 @@
 SPDX-License-Identifier: Apache-2.0
 Copyright 2017 Massachusetts Institute of Technology.
 '''
-
 import os
 import os.path
 import configparser
-import sys
-import urllib.parse
-import re
-from http.server import BaseHTTPRequestHandler
-import http.client
+from typing import Optional
 
-import tornado.web
 import yaml
 try:
     from yaml import CSafeLoader as SafeLoader
 except ImportError:
     from yaml import SafeLoader
+from yaml.reader import ReaderError
 
-from keylime import api_version as keylime_api_version
 from keylime import json
 
 
@@ -113,73 +107,40 @@ if not REQUIRE_ROOT:
 if not REQUIRE_ROOT:
     print("WARNING: running without root access")
 
-TPM_LIBS_PATH = '/usr/local/lib/'
-TPM_TOOLS_PATH = '/usr/local/bin/'
 
-
-CONFIG_FILE = os.getenv('KEYLIME_CONFIG', '/etc/keylime.conf')
-
-
-WARN = False
-if not os.path.exists(CONFIG_FILE):
-    # try to locate the config file next to the script if bundled
-    if getattr(sys, 'frozen', False):
-        CONFIG_FILE = os.path.dirname(
-            os.path.abspath(sys.executable)) + "/keylime.conf"
-    else:
-        # instead try to get config file from python data_files install
-        CONFIG_FILE = os.path.dirname(os.path.abspath(
-            __file__)) + "/../package_default/keylime.conf"
-        WARN = True
-
-if not os.path.exists(CONFIG_FILE):
-    raise Exception(f"{CONFIG_FILE} does not exist. Please set environment"
-                    f"variable KEYLIME_CONFIG or see {__file__} for more"
-                    f"details")
-print(f"Using config file {CONFIG_FILE}")
-if WARN:
-    print("WARNING: Keylime is using the config file from its installation location. \n\tWe recommend you copy keylime.conf to /etc/ to customize it.")
-
-
-_CURRENT_CONFIG = None
+# Config files can be merged together, reading from the system to the
+# user.
+CONFIG_FILES = [
+    os.path.expanduser("~/.config/keylime.conf"), "/etc/keylime.conf", "/usr/etc/keylime.conf"
+]
+if "KEYLIME_CONFIG" in os.environ:
+    CONFIG_FILES.insert(0, os.environ["KEYLIME_CONFIG"])
 
 
 def get_config():
-    global _CURRENT_CONFIG
-    if _CURRENT_CONFIG is None:
-        # read the config file
-        _CURRENT_CONFIG = configparser.ConfigParser()
-        _CURRENT_CONFIG.read(CONFIG_FILE)
-    return _CURRENT_CONFIG
+    """Read configuration files and merge them together."""
+    if not getattr(get_config, "config", None):
+        # TODO - use logger and be sure that all variables have a
+        # propper default, and the sections are initialized
+        if not any(os.path.exists(c) for c in CONFIG_FILES):
+            print(f"Config file not found in {CONFIG_FILES}. Please set "
+                  f"environment variable KEYLIME_CONFIG or see {__file__} "
+                  "for more details")
+
+        # Validate that at least one config file is present
+        get_config.config = configparser.ConfigParser()
+        config_files = get_config.config.read(CONFIG_FILES)
+        # TODO - use the logger
+        print(f"Reading configuration from {config_files}")
+    return get_config.config
 
 
-def get(section, option, fallback=None):
-    if fallback is not None:
-        return get_config().get(section, option, fallback=fallback)
-    return get_config().get(section, option)
-
-
-def getint(section, option, fallback=None):
-    if fallback is not None:
-        return get_config().get(section, option, fallback=fallback)
-    return get_config().getint(section, option)
-
-
-def getboolean(section, option, fallback=None):
-    if fallback is not None:
-        return get_config().getboolean(section, option, fallback=fallback)
-    return get_config().getboolean(section, option)
-
-
-def getfloat(section, option, fallback=None):
-    if fallback is not None:
-        return get_config().get(section, option, fallback=fallback)
-    return get_config().getfloat(section, option)
-
-
-def has_option(section, option):
-    return get_config().has_option(section, option)
-
+# Re-export some utility functions
+get = get_config().get
+getint = get_config().getint
+getboolean = get_config().getboolean
+getfloat = get_config().getfloat
+has_option = get_config().has_option
 
 if not REQUIRE_ROOT:
     DEFAULT_WORK_DIR = os.path.abspath(".")
@@ -206,92 +167,15 @@ def ch_dir(path, logger):
     os.chdir(path)
 
 
-def echo_json_response(handler, code, status=None, results=None):
-    """Takes a json package and returns it to the user w/ full HTTP headers"""
-    if handler is None or code is None:
-        return False
-    if status is None:
-        status = http.client.responses[code]
-    if results is None:
-        results = {}
-
-    json_res = {'code': code, 'status': status, 'results': results}
-    json_response = json.dumps(json_res)
-    json_response = json_response.encode('utf-8')
-
-    if isinstance(handler, BaseHTTPRequestHandler):
-        handler.send_response(code)
-        handler.send_header('Content-Type', 'application/json')
-        handler.end_headers()
-        handler.wfile.write(json_response)
-        return True
-    if isinstance(handler, tornado.web.RequestHandler):
-        handler.set_status(code)
-        handler.set_header('Content-Type', 'application/json')
-        handler.write(json_response)
-        handler.finish()
-        return True
-
-    return False
-
-
-def list_to_dict(alist):
-    """Convert list into dictionary via grouping [k0,v0,k1,v1,...]"""
-    params = {}
-    i = 0
-    while i < len(alist):
-        params[alist[i]] = alist[i + 1] if (i + 1) < len(alist) else None
-        i = i + 2
-    return params
-
-
-def yaml_to_dict(arry, add_newlines=True):
+def yaml_to_dict(arry, add_newlines=True, logger=None) -> Optional[dict]:
     arry = convert(arry)
     sep = "\n" if add_newlines else ""
-    return yaml.load(sep.join(arry), Loader=SafeLoader)
-
-
-def get_restful_params(urlstring):
-    """Returns a dictionary of paired RESTful URI parameters"""
-    parsed_path = urllib.parse.urlsplit(urlstring.strip("/"))
-    query_params = urllib.parse.parse_qsl(parsed_path.query)
-    path_tokens = parsed_path.path.split('/')
-
-    # If first token looks like an API version, validate it and make sure it's supported
-    api_version = 0
-    if path_tokens[0] and len(path_tokens[0]) >= 0 and re.match(r"^v?[0-9]+(\.[0-9]+)?", path_tokens[0]):
-        version = keylime_api_version.normalize_version(path_tokens[0])
-
-        if keylime_api_version.is_supported_version(version):
-            api_version = version
-
-        path_tokens.pop(0)
-
-    path_params = list_to_dict(path_tokens)
-    path_params["api_version"] = api_version
-    path_params.update(query_params)
-    return path_params
-
-
-def valid_exclude_list(exclude_list):
-    if not exclude_list:
-        return True, None, None
-
-    combined_regex = "(" + ")|(".join(exclude_list) + ")"
-    return valid_regex(combined_regex)
-
-
-def valid_regex(regex):
-    if regex is None:
-        return True, None, None
-
     try:
-        compiled_regex = re.compile(regex)
-    except re.error as regex_err:
-        err = "Invalid regex: " + regex_err.msg + "."
-        return False, None, err
-
-    return True, compiled_regex, None
+        return yaml.load(sep.join(arry), Loader=SafeLoader)
+    except ReaderError as err:
+        if logger is not None:
+            logger.warning("Could not load yaml as dict: %s", str(err))
+    return None
 
 
 if STUB_IMA:
@@ -319,6 +203,6 @@ TPM_DATA_PCR = 16
 BOOTSTRAP_KEY_SIZE = 32
 
 # choose between cfssl or openssl for creating CA certificates
-CA_IMPL = get_config().get('general', 'ca_implementation')
+CA_IMPL = get_config().get('general', 'ca_implementation', fallback='openssl')
 
 CRL_PORT = 38080
