@@ -1,0 +1,25 @@
+# shared functions between all postinst files
+
+keylime_setup_group_user ()
+{
+    # creating tss group if he isn't already there
+    if ! getent group tss >/dev/null; then
+        addgroup --system tss
+    fi
+
+    # creating tss user if he isn't already there
+    if ! getent passwd tss >/dev/null; then
+        adduser --system --ingroup tss --shell /bin/false \
+                --home /var/lib/tpm --no-create-home \
+                --gecos "TPM software stack" \
+                tss
+    fi
+
+    # creating keylime user if he isn't already there
+    if ! getent passwd keylime >/dev/null; then
+        adduser --system --ingroup tss --shell /bin/false \
+                --home /var/lib/keylime --no-create-home \
+                --gecos "Keylime remote attestation" \
+                keylime
+    fi
+}
