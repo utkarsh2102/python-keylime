@@ -27,7 +27,7 @@ To run without root privileges, be sure to export KEYLIME_TEST=True
 For Python Coverage support (pip install coverage), set env COVERAGE_FILE and:
     * coverage run --parallel-mode test_restful.py
 '''
-
+import datetime
 import sys
 import signal
 import unittest
@@ -43,8 +43,8 @@ from cryptography.hazmat.primitives import serialization
 
 import dbus
 
-import keylime.keylime_agent
 from keylime import config
+from keylime import fs_util
 from keylime import tornado_requests
 from keylime.requests_client import RequestsClient
 from keylime import tenant
@@ -100,6 +100,7 @@ cv_process = None
 reg_process = None
 agent_process = None
 tenant_templ = None
+SKIP_RUST_TEST = not bool(os.getenv("RUST_TEST"))
 
 # Class-level components that are not static (so can't be added to test class)
 public_key = None
@@ -252,11 +253,17 @@ def launch_registrar():
     return True
 
 
-def launch_cloudagent():
+def launch_cloudagent(agent="python"):
     """Start up the cloud agent"""
     global agent_process, script_env, FORK_ARGS
+    if agent == "python":
+        agent_path = "keylime_agent"
+    elif agent == "rust":
+        agent_path = f"{PACKAGE_ROOT}/../rust-keylime/target/debug/keylime_agent"
+    else:
+        agent_path = "echo"
     if agent_process is None:
-        agent_process = subprocess.Popen("keylime_agent",
+        agent_process = subprocess.Popen(agent_path,
                                          shell=False,
                                          preexec_fn=os.setsid,
                                          stdout=subprocess.PIPE,
@@ -275,7 +282,13 @@ def launch_cloudagent():
                 sys.stdout.write('\n\033[94m' + line + '\033[0m')
         t = threading.Thread(target=initthread)
         t.start()
-        time.sleep(10)
+        for retry in range(10):
+            r = subprocess.run(["ss", "-l", "-t", "-n", "-p",  "( sport = :9002 )"], stdout=subprocess.PIPE, check=False)
+            if b":9002" in r.stdout:
+                break
+            if retry == 10:
+                raise Exception(f"{agent} keylime_agent failed to launch")
+            time.sleep(1)
     return True
 
 
@@ -307,6 +320,9 @@ def kill_cloudagent():
     os.killpg(os.getpgid(agent_process.pid), signal.SIGINT)
     agent_process.wait()
     agent_process = None
+
+    # Run tpm2_clear to allow other processes to use the TPM
+    subprocess.run("tpm2_clear", stdout=subprocess.PIPE, check=False)
 
 
 def services_running():
@@ -373,15 +389,14 @@ class TestRestful(unittest.TestCase):
 
         # Change CWD for TPM-related operations
         cwd = os.getcwd()
-        config.ch_dir(config.WORK_DIR, None)
+        fs_util.ch_dir(config.WORK_DIR)
         _ = secure_mount.mount()
 
-        # Create an agent server to get the mtls certificate
-        agent_server = keylime.keylime_agent.CloudAgentHTTPServer(("127.0.0.1", 9002),
-                                                                  keylime.keylime_agent.Handler,
-                                                                  config.get('cloud_agent', 'agent_uuid'))
+        # Create a mTLS cert for testing
         global mtls_cert
-        mtls_cert = agent_server.mtls_cert.public_bytes(serialization.Encoding.PEM)
+        rsa_key = crypto.rsa_generate(2048)
+        valid_util = datetime.datetime.utcnow() + datetime.timedelta(days=(360 * 5))
+        mtls_cert = crypto.generate_selfsigned_cert("TEST_CERT", rsa_key, valid_util).public_bytes(serialization.Encoding.PEM)
 
         # Initialize the TPM with AIK
         (ekcert, ek_tpm, aik_tpm) = tpm_instance.tpm_init(self_activate=False,
@@ -396,7 +411,7 @@ class TestRestful(unittest.TestCase):
                 ekcert = 'emulator'
 
         # Get back to our original CWD
-        config.ch_dir(cwd, None)
+        fs_util.ch_dir(cwd)
 
         data = {
             'ekcert': ekcert,
@@ -518,7 +533,6 @@ class TestRestful(unittest.TestCase):
 
         # We want a real cloud agent to communicate with!
         launch_cloudagent()
-        time.sleep(10)
         test_020_agent_keys_pubkey_get = RequestsClient(tenant_templ.agent_base_url, tls_enabled=True, ignore_hostname=True)
         response = test_020_agent_keys_pubkey_get.get(
             f'/v{self.api_version}/keys/pubkey',
@@ -930,6 +944,53 @@ class TestRestful(unittest.TestCase):
         results = json_response['results']
         self.assertEqual(results['current_version'], api_version.current_version())
         self.assertEqual(results['supported_versions'], api_version.all_versions())
+
+    # Rust agent testset
+    @unittest.skipIf(SKIP_RUST_TEST, "Testing against rust-keylime is disabled!")
+    def test_070_rust_agent_setup(self):
+        """Set up the Rust agent"""
+
+        # Kill the Python agent and launch the Rust agent!
+        kill_cloudagent()
+        launch_cloudagent(agent="rust")
+
+    @unittest.skipIf(SKIP_RUST_TEST, "Testing against rust-keylime is disabled!")
+    def test_071_agent_keys_pubkey_get(self):
+        # NOTE: launch_cloudagent(), which starts the Python cloud agent, is
+        # invoked during this test. However, this shouldn't conflict with the
+        # Rust agent - it was already set up in 070, and launch_cloudagent()
+        # will not invoke the Python agent unless there is no agent already
+        # running.
+        launch_cloudagent(agent="rust")
+        self.test_020_agent_keys_pubkey_get()
+
+    @unittest.skipIf(SKIP_RUST_TEST, "Testing against rust-keylime is disabled!")
+    def test_072_reg_agent_get(self):
+        launch_cloudagent(agent="rust")
+        self.test_021_reg_agent_get()
+
+    @unittest.skipIf(SKIP_RUST_TEST, "Testing against rust-keylime is disabled!")
+    def test_073_agent_quotes_identity_get(self):
+        launch_cloudagent(agent="rust")
+        self.test_022_agent_quotes_identity_get()
+
+    @unittest.skipIf(SKIP_RUST_TEST, "Testing against rust-keylime is disabled!")
+    def test_074_agent_keys_vkey_post(self):
+        launch_cloudagent(agent="rust")
+        self.test_023_agent_keys_vkey_post()
+
+    #@unittest.skipIf(SKIP_RUST_TEST, "Testing against rust-keylime is disabled!")
+    @unittest.skip("Testing of Rust agent's POST /keys/ukey disabled! (Rust agent's API endpoint is broken due to a workaround, see https://github.com/keylime/rust-keylime/issues/306)")
+    def test_075_agent_keys_ukey_post(self):
+        launch_cloudagent(agent="rust")
+        self.test_024_agent_keys_ukey_post()
+
+    #@unittest.skipIf(SKIP_RUST_TEST, "Testing against rust-keylime is disabled!")
+    @unittest.skip("Testing of Rust agent's GET /quote/integrity disabled! (Rust agent's API endpoint is broken, see https://github.com/keylime/rust-keylime/issues/285)")
+    def test_076_agent_quotes_integrity_get(self):
+        launch_cloudagent(agent="rust")
+        self.test_040_agent_quotes_integrity_get()
+
 
     def tearDown(self):
         """Nothing to bring down after each test"""

@@ -108,7 +108,7 @@ class AbstractTPM(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def get_tpm_manufacturer(self):
+    def get_tpm_manufacturer(self, output=None):
         pass
 
     @abstractmethod
@@ -122,7 +122,7 @@ class AbstractTPM(metaclass=ABCMeta):
     def warn_emulator(self):
         if self.is_emulator():
             logger.warning("INSECURE: Keylime is using a software TPM emulator rather than a real hardware TPM.")
-            logger.warning("INSECURE: The security of Keylime is NOT linked to a hardware root of trust.")
+            logger.warning("INSECURE: The security of Keylime is currently NOT linked to a hardware root of trust.")
             logger.warning("INSECURE: Only use Keylime in this mode for testing or debugging purposes.")
 
     def __read_tpm_data(self):
@@ -133,10 +133,9 @@ class AbstractTPM(metaclass=ABCMeta):
             return {}
 
     def __write_tpm_data(self):
-        os.umask(0o077)
         if os.geteuid() != 0 and config.REQUIRE_ROOT:
             logger.warning("Creating tpm metadata file without root. Sensitive trust roots may be at risk!")
-        with open('tpmdata.yml', 'w', encoding="utf-8") as f:
+        with os.fdopen(os.open("tpmdata.yml", os.O_WRONLY | os.O_CREAT, 0o600), "w", encoding="utf-8") as f:
             yaml.dump(self.global_tpmdata, f, Dumper=SafeDumper)
 
     def get_tpm_metadata(self, key):
