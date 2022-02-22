@@ -7,6 +7,13 @@ import os.path
 import configparser
 from typing import Optional
 
+# resources in importlib is a Python 3.7 feature, so we disable fallback support if we cannot import this module
+try:
+    from importlib import resources
+    _CONFIG_FALLBACK = True
+except ImportError:
+    _CONFIG_FALLBACK = False
+
 import yaml
 try:
     from yaml import CSafeLoader as SafeLoader
@@ -120,18 +127,24 @@ if "KEYLIME_CONFIG" in os.environ:
 def get_config():
     """Read configuration files and merge them together."""
     if not getattr(get_config, "config", None):
+        # Use RawConfigParser, so we can also use it as the logging config
+        config = configparser.RawConfigParser()
         # TODO - use logger and be sure that all variables have a
         # propper default, and the sections are initialized
         if not any(os.path.exists(c) for c in CONFIG_FILES):
             print(f"Config file not found in {CONFIG_FILES}. Please set "
                   f"environment variable KEYLIME_CONFIG or see {__file__} "
-                  "for more details")
-
-        # Validate that at least one config file is present
-        get_config.config = configparser.ConfigParser()
-        config_files = get_config.config.read(CONFIG_FILES)
-        # TODO - use the logger
-        print(f"Reading configuration from {config_files}")
+                  "for more details.")
+            if _CONFIG_FALLBACK:
+                print("Falling back on package provided configuration")
+                file = resources.files(__package__).joinpath("keylime.conf")
+                config.read_string(file.read_text("utf-8"))
+        else:
+            # Validate that at least one config file is present
+            config_files = config.read(CONFIG_FILES)
+            # TODO - use the logger
+            print(f"Reading configuration from {config_files}")
+        get_config.config = config
     return get_config.config
 
 
@@ -149,22 +162,6 @@ else:
 WORK_DIR = os.getenv('KEYLIME_DIR', DEFAULT_WORK_DIR)
 
 CA_WORK_DIR = '%s/ca/' % WORK_DIR
-
-
-def chownroot(path, logger):
-    if os.geteuid() == 0:
-        os.chown(path, 0, 0)
-    elif REQUIRE_ROOT:
-        logger.debug(
-            "Unable to change ownership to root for file: %s" % (path))
-
-
-def ch_dir(path, logger):
-    if not os.path.exists(path):
-        os.makedirs(path, 0o700)
-        chownroot(path, logger)
-    os.umask(0o077)
-    os.chdir(path)
 
 
 def yaml_to_dict(arry, add_newlines=True, logger=None) -> Optional[dict]:
