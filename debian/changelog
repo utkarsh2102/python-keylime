@@ -1,3 +1,13 @@
+keylime (6.3.1-1) UNRELEASED; urgency=medium
+
+  * New upstream version 6.3.1
+  * d/patches: disable dataclasses patch
+  * remove symlink keylime/keylime.conf
+  * d/python3-keylime-server.install: removed provider binaries
+  * add /var/run/keylime to server components
+
+ -- Thore Sommer <debian@thson.de>  Tue, 22 Feb 2022 12:47:07 +0100
+
 keylime (6.3.0-1) unstable; urgency=medium
 
   [ Thore Sommer ]
