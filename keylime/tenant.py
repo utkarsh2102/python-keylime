@@ -23,7 +23,7 @@ from cryptography.hazmat.primitives import serialization as crypto_serialization
 
 from keylime.agentstates import AgentAttestState
 from keylime.requests_client import RequestsClient
-from keylime.common import states
+from keylime.common import states, retry
 from keylime import config
 from keylime import keylime_logging
 from keylime import registrar_client
@@ -656,7 +656,7 @@ class Tenant():
             sys.exit()
 
     def do_cvstatus(self):
-        """Perform operational state look up for agent"""
+        """Perform operational state look up for agent on the verifier"""
 
         do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
 
@@ -697,7 +697,7 @@ class Tenant():
         return response
 
     def do_cvlist(self):
-        """List all agent statues in cloudverifier"""
+        """List all agent statuses in cloudverifier"""
 
         do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
         verifier_id = ""
@@ -1007,10 +1007,12 @@ class Tenant():
                     if numtries >= maxr:
                         logger.error("Tenant cannot establish connection to agent on %s with port %s", self.agent_ip, self.agent_port)
                         sys.exit()
-                    retry = config.getfloat('tenant', 'retry_interval')
+                    interval = config.getfloat('tenant', 'retry_interval')
+                    exponential_backoff = config.getboolean('tenant', 'exponential_backoff')
+                    next_retry = retry.retry_time(exponential_backoff, interval, numtries, logger)
                     logger.info("Tenant connection to agent at %s refused %s/%s times, trying again in %s seconds...",
-                        self.agent_ip, numtries, maxr, retry)
-                    time.sleep(retry)
+                        self.agent_ip, numtries, maxr, next_retry)
+                    time.sleep(next_retry)
                     continue
 
                 raise e
@@ -1133,10 +1135,12 @@ class Tenant():
                     if numtries >= maxr:
                         logger.error("Cannot establish connection to agent on %s with port %s", self.agent_ip, self.agent_port)
                         sys.exit()
-                    retry = config.getfloat('tenant', 'retry_interval')
+                    interval = config.getfloat('tenant', 'retry_interval')
+                    exponential_backoff = config.getboolean('tenant', 'exponential_backoff')
+                    next_retry = retry.retry_time(exponential_backoff, interval, numtries, logger)
                     logger.info("Verifier connection to agent at %s refused %s/%s times, trying again in %s seconds...",
-                        self.agent_ip, numtries, maxr, retry)
-                    time.sleep(retry)
+                        self.agent_ip, numtries, maxr, next_retry)
+                    time.sleep(next_retry)
                     continue
 
                 raise e
@@ -1156,9 +1160,9 @@ class Tenant():
             else:
                 keylime_logging.log_http_response(
                     logger, logging.ERROR, response_body)
-                retry = config.getfloat('tenant', 'retry_interval')
-                logger.warning("Key derivation not yet complete...trying again in %s seconds...Ctrl-C to stop", retry)
-                time.sleep(retry)
+                interval = config.getfloat('tenant', 'retry_interval')
+                logger.warning("Key derivation not yet complete...trying again in %s seconds...Ctrl-C to stop", interval)
+                time.sleep(interval)
                 continue
             break
 
@@ -1214,8 +1218,7 @@ def main(argv=sys.argv):
     parser.add_argument('-c', '--command', action='store', dest='command', default='add',
                         help="valid commands are add,delete,update,"
                              "regstatus,cvstatus,status,reglist,cvlist,reactivate,"
-                             "regdelete,"
-                             "bulkinfo. defaults to add")
+                             "regdelete,bulkinfo,addallowlist,showallowlist,deleteallowlist. defaults to add")
     parser.add_argument('-t', '--targethost', action='store',
                         dest='agent_ip', help="the IP address of the host to provision")
     parser.add_argument('-tp', '--targetport', action='store',

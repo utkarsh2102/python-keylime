@@ -5,6 +5,7 @@ Copyright 2017 Massachusetts Institute of Technology.
 
 import base64
 import binascii
+import collections
 import hashlib
 import os
 import re
@@ -30,7 +31,7 @@ from keylime import keylime_logging
 from keylime import secure_mount
 from keylime.tpm import tpm_abstract
 from keylime import tpm_ek_ca
-from keylime.common import algorithms
+from keylime.common import algorithms, retry
 from keylime.tpm import tpm2_objects
 from keylime.failure import Failure, Component
 
@@ -239,6 +240,10 @@ class tpm(tpm_abstract.AbstractTPM):
                 raise Exception('Unsupported encryption algorithm specified: %s!' % (defaultEncrypt))
             if defaultSign not in self.supported['sign']:
                 raise Exception('Unsupported signing algorithm specified: %s!' % (defaultSign))
+
+            enabled_pcrs = self.__get_pcrs()
+            if not enabled_pcrs.get(str(defaultHash)):
+                raise Exception(f'No PCR banks enabled for hash algorithm specified: {defaultHash}')
         else:
             # Assume their defaults are sane?
             pass
@@ -308,6 +313,29 @@ class tpm(tpm_abstract.AbstractTPM):
             elif details["asymmetric"] == 1 and details["signing"] == 1 and algorithms.Sign.is_recognized(algorithm):
                 self.supported['sign'].add(algorithm)
 
+    def __get_pcrs(self):
+        """Gets which PCRs are enabled with which hash algorithm"""
+        if self.tools_version == "3.2":
+            retDict = self.__run(["tpm2_getcap", "-c", "pcrs"])
+        elif self.tools_version in ["4.0", "4.2"]:
+            retDict = self.__run(["tpm2_getcap", "pcrs"])
+
+        output = config.convert(retDict['retout'])
+        errout = config.convert(retDict['reterr'])
+        code = retDict['code']
+
+        if code != tpm_abstract.AbstractTPM.EXIT_SUCESS:
+            raise Exception("get_tpm_algorithms failed with code " + str(code) + ": " + str(errout))
+
+        retyaml = config.yaml_to_dict(output, logger=logger)
+        pcrs = {}
+        if retyaml is None:
+            logger.warning("Could not read YAML output of tpm2_getcap.")
+            return pcrs
+        if "selected-pcrs" in retyaml:
+            pcrs = collections.ChainMap(*retyaml["selected-pcrs"])
+        return pcrs
+
     # tpm_exec
     @staticmethod
     def __fingerprint(cmd):
@@ -368,9 +396,11 @@ class tpm(tpm_abstract.AbstractTPM):
                 if numtries >= maxr:
                     logger.error("Agent did not return proper quote due to PCR race condition.")
                     break
-                retry = config.getfloat('cloud_agent', 'retry_interval')
-                logger.info("Failed to get quote %d/%d times, trying again in %f seconds..." % (numtries, maxr, retry))
-                time.sleep(retry)
+                interval = config.getfloat('cloud_agent', 'retry_interval')
+                exponential_backoff = config.getboolean('cloud_agent', 'exponential_backoff')
+                next_retry = retry.retry_time(exponential_backoff, interval, numtries, logger)
+                logger.info("Failed to get quote %d/%d times, trying again in %f seconds..." % (numtries, maxr, next_retry))
+                time.sleep(next_retry)
                 continue
 
             break
@@ -772,7 +802,7 @@ class tpm(tpm_abstract.AbstractTPM):
             f.close()
 
             # read in the aes key
-            key = base64.b64encode(challenge)
+            key = base64.b64encode(challenge).decode("utf-8")
 
         except Exception as e:
             logger.error("Error encrypting AIK: " + str(e))
@@ -895,24 +925,34 @@ class tpm(tpm_abstract.AbstractTPM):
         logger.error("No Root CA matched EK Certificate")
         return False
 
-    def get_tpm_manufacturer(self):
+    def get_tpm_manufacturer(self, output=None):
         vendorStr = None
-        if self.tools_version == "3.2":
-            retDict = self.__run(["tpm2_getcap", "-c", "properties-fixed"])
-        elif self.tools_version in ["4.0", "4.2"]:
-            retDict = self.__run(["tpm2_getcap", "properties-fixed"])
-        output = retDict['retout']
-        reterr = retDict['reterr']
-        code = retDict['code']
+        if not output:
+            if self.tools_version == "3.2":
+                retDict = self.__run(["tpm2_getcap", "-c", "properties-fixed"])
+            elif self.tools_version in ["4.0", "4.2"]:
+                retDict = self.__run(["tpm2_getcap", "properties-fixed"])
+            output = retDict['retout']
+            reterr = retDict['reterr']
+            code = retDict['code']
 
-        if code != tpm_abstract.AbstractTPM.EXIT_SUCESS:
-            raise Exception("get_tpm_manufacturer failed with code " + str(code) + ": " + str(reterr))
+            if code != tpm_abstract.AbstractTPM.EXIT_SUCESS:
+                raise Exception("get_tpm_manufacturer failed with code " + str(code) + ": " + str(reterr))
+
 
         # Clean up TPM manufacturer information (strip control characters)
         # These strings are supposed to be printable ASCII characters, but
         # some TPM manufacturers put control characters in here
+        #
+        # TPM manufacturer information can also contain un-escaped
+        # double quotes. Making sure that un-escaped quotes are
+        # replaced before attempting YAML parse.
+        def quoterepl(m):
+            return '"' + m.group(0)[1:-1].replace('"', '\\"') + '"'
+
         for i, s in enumerate(output):
-            output[i] = re.sub(r"[\x01-\x1F\x7F]", "", s.decode('utf-8')).encode('utf-8')
+            s1 = re.sub(r'(?!".*\\".*")".*".*"', quoterepl, s.decode('utf-8'))
+            output[i] = re.sub(r"[\x01-\x1F\x7F]", "", s1).encode('utf-8')
 
         retyaml = config.yaml_to_dict(output, logger=logger)
         if retyaml is None:
@@ -1130,13 +1170,15 @@ class tpm(tpm_abstract.AbstractTPM):
                                                     "data": retout}, False)
             return failure
         if "pcrs" in jsonout:
-            if hash_alg in jsonout["pcrs"]:
+            # The hash algorithm might be in the YAML output but does not contain any data, so we also check that.
+            if hash_alg in jsonout["pcrs"] and jsonout["pcrs"][hash_alg] is not None:
                 alg_size = hash_alg.get_size() // 4
                 for pcrval, hashval in jsonout["pcrs"][hash_alg].items():
                     pcrs.append("PCR " + str(pcrval) + " " + '{0:0{1}x}'.format(hashval, alg_size))
 
         if len(pcrs) == 0:
-            pcrs = None
+            logger.warning("Quote does not contain any PCRs. Make sure that the TPM supports %s PCR banks",
+                           str(hash_alg))
 
         return self.check_pcrs(agentAttestState, tpm_policy, pcrs, data, False, ima_measurement_list, allowlist,
                                ima_keyrings, mb_measurement_list, mb_refstate, hash_alg)

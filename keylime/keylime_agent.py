@@ -30,12 +30,14 @@ import subprocess
 import psutil
 
 from cryptography import x509
+from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import serialization
 
 from keylime import config
 from keylime import keylime_logging
 from keylime import cmd_exec
 from keylime import crypto
+from keylime import fs_util
 from keylime import ima
 from keylime import json
 from keylime import revocation_notifier
@@ -83,7 +85,7 @@ class Handler(BaseHTTPRequestHandler):
             version_info = {
                 "supported_version": keylime_api_version.current_version()
             }
-            web_util.echo_json_response(self, 200, version_info)
+            web_util.echo_json_response(self, 200, "Success", version_info)
             return
 
         if not rest_params["api_version"]:
@@ -396,20 +398,26 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
     next_ima_ml_entry = 0 # The next IMA log offset the verifier may ask for.
     boottime = int(psutil.boot_time())
 
-    def __init__(self, server_address, RequestHandlerClass, agent_uuid):
+    def __init__(self, server_address, RequestHandlerClass, agent_uuid, contact_ip):
         """Constructor overridden to provide ability to pass configuration arguments to the server"""
+        # Find the locations for the U/V transport and mTLS key and certificate.
+        # They are either relative to secdir (/var/lib/keylime/secure) or absolute paths.
         secdir = secure_mount.mount()
-        keyname = os.path.join(secdir,
-                               config.get('cloud_agent', 'rsa_keyname'))
-        certname = os.path.join(secdir, config.get('cloud_agent', 'mtls_cert'))
+        keyname = config.get('cloud_agent', 'rsa_keyname')
+        if not os.path.isabs(keyname):
+            keyname = os.path.join(secdir, keyname)
+        certname = config.get('cloud_agent', 'mtls_cert')
+        if not os.path.isabs(certname):
+            certname = os.path.join(secdir, certname)
+
         # read or generate the key depending on configuration
         if os.path.isfile(keyname):
             # read in private key
-            logger.debug("Using existing key in %s", keyname)
+            logger.info("Using existing key in %s", keyname)
             f = open(keyname, "rb")
             rsa_key = crypto.rsa_import_privkey(f.read())
         else:
-            logger.debug("key not found, generating a new one")
+            logger.info("Key for U/V transport and mTLS certificate not found, generating a new one")
             rsa_key = crypto.rsa_generate(2048)
             with open(keyname, "wb") as f:
                 f.write(crypto.rsa_export_privkey(rsa_key))
@@ -420,15 +428,18 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
             self.rsaprivatekey)
 
         if os.path.isfile(certname):
-            logger.debug("Using existing mTLS cert in %s", certname)
+            logger.info("Using existing mTLS cert in %s", certname)
             with open(certname, "rb") as f:
-                mtls_cert = x509.load_pem_x509_certificate(f.read())
+                mtls_cert = x509.load_pem_x509_certificate(f.read(), backend=default_backend())
         else:
-            logger.debug("No mTLS certificate found generating a new one")
+            logger.info("No mTLS certificate found, generating a new one")
+            agent_ips = [server_address[0]]
+            if contact_ip is not None:
+                agent_ips.append(contact_ip)
             with open(certname, "wb") as f:
                 # By default generate a TLS certificate valid for 5 years
                 valid_util = datetime.datetime.utcnow() + datetime.timedelta(days=(360 * 5))
-                mtls_cert = crypto.generate_selfsigned_cert(agent_uuid, rsa_key, valid_util)
+                mtls_cert = crypto.generate_selfsigned_cert(agent_uuid, rsa_key, valid_util, agent_ips)
                 f.write(mtls_cert.public_bytes(serialization.Encoding.PEM))
 
         self.mtls_cert_path = certname
@@ -531,8 +542,15 @@ def revocation_listener():
     This configures and starts the revocation listener. It is designed to be started in a separate process.
     """
 
-    if not config.getboolean('cloud_agent', 'listen_notfications'):
-        return
+    if config.has_option('cloud_agent', 'listen_notifications'):
+        if not config.getboolean('cloud_agent', 'listen_notifications'):
+            return
+
+    # keep old typo "listen_notfications" around for a few versions
+    if config.has_option('cloud_agent', 'listen_notfications'):
+        logger.warning('Option typo "listen_notfications" is deprecated. Please use "listen_notifications" instead.')
+        if not config.getboolean('cloud_agent', 'listen_notfications'):
+            return
 
     secdir = secure_mount.mount()
 
@@ -628,7 +646,10 @@ def main():
     secure_mount.mount()
 
     # change dir to working dir
-    config.ch_dir(config.WORK_DIR, logger)
+    fs_util.ch_dir(config.WORK_DIR)
+
+    # set a conservative general umask
+    os.umask(0o077)
 
     # initialize tpm
     (ekcert, ek_tpm, aik_tpm) = instance_tpm.tpm_init(self_activate=False, config_pw=config.get(
@@ -702,7 +723,7 @@ def main():
     if keylime_ca == "default":
         keylime_ca = os.path.join(config.WORK_DIR, 'cv_ca', 'cacert.crt')
 
-    server = CloudAgentHTTPServer(serveraddr, Handler, agent_uuid)
+    server = CloudAgentHTTPServer(serveraddr, Handler, agent_uuid, contact_ip)
     context = web_util.generate_mtls_context(server.mtls_cert_path, server.rsakey_path, keylime_ca, logger=logger)
     server.socket = context.wrap_socket(server.socket, server_side=True)
     serverthread = threading.Thread(target=server.serve_forever, daemon=True)

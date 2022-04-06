@@ -15,6 +15,7 @@ swtpm socket --tpm2 \
      --server type=tcp,port=2321 \
      --daemon
 export TPM2TOOLS_TCTI=tabrmd:
+export TCTI=tabrmd:
 
 # Configure dbus
 sudo rm -rf /var/run/dbus
@@ -34,5 +35,13 @@ then
 else
     REPO_DIR="/root/keylime"
 fi
+
+# Move /etc/keylime.conf because there might a old one distributed with the container.
+if [ -f "/etc/keylime.conf" ]
+then
+    echo "Moving /etc/keylime.conf from the container to /etc/keylime.conf.orig"
+    mv /etc/keylime.conf /etc/keylime.conf.orig
+fi
+
 chmod +x $REPO_DIR/test/run_tests.sh
 $REPO_DIR/test/run_tests.sh -s openssl
