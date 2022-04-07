@@ -33,35 +33,33 @@ def encrypt(contents):
     return {'u': u, 'v': v, 'k': k, 'ciphertext': ciphertext}
 
 
-def main(argv=sys.argv):
+def main(argv=sys.argv):  #pylint: disable=dangerous-default-value
     if len(argv) < 2:
         usage()
 
     infile = argv[1]
 
     if not os.path.isfile(infile):
-        print("ERROR: File %s not found." % infile)
+        print(f"ERROR: File %s not found. {infile}")
         usage()
 
-    f = open(infile, encoding="utf-8")
-    contents = f.read()
+    with open(infile, encoding="utf-8") as f:
+        contents = f.read()
 
     ret = encrypt(contents)
 
     print("Writing keys to content_keys.txt")
-    f = open('content_keys.txt', 'w', encoding="utf-8")
-    f.write(base64.b64encode(ret['k']).decode('utf-8'))
-    f.write('\n')
-    f.write(base64.b64encode(ret['v']).decode('utf-8'))
-    f.write('\n')
-    f.write(base64.b64encode(ret['u']).decode('utf-8'))
-    f.write('\n')
-    f.close()
+    with open('content_keys.txt', 'w', encoding="utf-8") as f:
+        f.write(base64.b64encode(ret['k']).decode('utf-8'))
+        f.write('\n')
+        f.write(base64.b64encode(ret['v']).decode('utf-8'))
+        f.write('\n')
+        f.write(base64.b64encode(ret['u']).decode('utf-8'))
+        f.write('\n')
 
     print("Writing encrypted data to content_payload.txt")
-    f = open('content_payload.txt', 'w', encoding="utf-8")
-    f.write(ret['ciphertext'].decode('utf-8'))
-    f.close()
+    with open('content_payload.txt', 'w', encoding="utf-8") as f:
+        f.write(ret['ciphertext'].decode('utf-8'))
 
 
 if __name__ == "__main__":

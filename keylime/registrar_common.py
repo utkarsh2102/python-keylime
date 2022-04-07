@@ -21,7 +21,6 @@ from cryptography.x509 import load_der_x509_certificate
 from keylime.common import validators
 from keylime.db.registrar_db import RegistrarMain
 from keylime.db.keylime_db import DBEngineManager, SessionManager
-from keylime import config
 from keylime import crypto
 from keylime import json
 from keylime.tpm import tpm2_objects
@@ -90,13 +89,13 @@ class ProtectedHandler(BaseHTTPRequestHandler, SessionManager):
                 logger.error('SQLAlchemy Error: %s', e)
 
             if agent is None:
-                web_util.echo_json_response(self, 404, "agent_id not found")
-                logger.warning('GET returning 404 response. agent_id %s not found.', agent_id)
+                web_util.echo_json_response(self, 404, f"agent {agent_id} not found")
+                logger.warning('GET returning 404 response. agent %s not found.', agent_id)
                 return
 
             if not bool(agent.active):
-                web_util.echo_json_response(self, 404, "agent_id not yet active")
-                logger.warning('GET returning 404 response. agent_id %s not yet active.', agent_id)
+                web_util.echo_json_response(self, 404, f"agent {agent_id} not yet active")
+                logger.warning('GET returning 404 response. agent %s not yet active.', agent_id)
                 return
 
             response = {
@@ -273,13 +272,13 @@ class UnprotectedHandler(BaseHTTPRequestHandler, SessionManager):
             initialize_tpm = tpm()
 
             if ekcert is None or ekcert == 'emulator':
-                logger.warning('Agent %s did not submit an ekcert' % agent_id)
+                logger.warning('Agent %s did not submit an ekcert', agent_id)
                 ek_tpm = json_body['ek_tpm']
             else:
                 if 'ek_tpm' in json_body:
                     # This would mean the agent submitted both a non-None ekcert, *and*
                     #  an ek_tpm... We can deal with it by just ignoring the ek_tpm they sent
-                    logger.warning('Overriding ek_tpm for agent %s from ekcert' % agent_id)
+                    logger.warning('Overriding ek_tpm for agent %s from ekcert', agent_id)
                 # If there's an EKCert, we just overwrite their ek_tpm
                 # Note, we don't validate the EKCert here, other than the implicit
                 #  "is it a valid x509 cert" check. So it's still untrusted.
@@ -353,22 +352,25 @@ class UnprotectedHandler(BaseHTTPRequestHandler, SessionManager):
                     # Use parser from the standard library instead of implementing our own
                     ipaddress.ip_address(contact_ip)
                 except ValueError:
-                    logger.warning(f"Contact ip for agent {agent_id} is not a valid ip got: {contact_ip}.")
+                    logger.warning("Contact ip for agent %s is not a valid ip got: %s.", agent_id, contact_ip)
                     contact_ip = None
             if contact_port is not None:
                 try:
                     contact_port = int(contact_port)
                     if contact_port < 1 or contact_port > 65535:
-                        logger.warning(f"Contact port for agent {agent_id} is not a number between 1 and got: {contact_port}.")
+                        logger.warning("Contact port for agent %s is not a number between 1 and got: %s.",
+                                       agent_id, contact_port)
                         contact_port = None
                 except ValueError:
-                    logger.warning(f"Contact port for agent {agent_id} is not a valid number got: {contact_port}.")
+                    logger.warning("Contact port for agent %s is not a valid number got: %s.",
+                                   agent_id, contact_port)
                     contact_port = None
 
             # Check for mTLS cert
             mtls_cert = json_body.get('mtls_cert', None)
             if mtls_cert is None:
-                logger.warning(f"Agent {agent_id} did not sent a mTLS certificate. Most operations will not work!")
+                logger.warning("Agent %s did not send a mTLS certificate. Most operations will not work!",
+                               agent_id)
 
             # Add values to database
             d = {}
@@ -400,7 +402,7 @@ class UnprotectedHandler(BaseHTTPRequestHandler, SessionManager):
 
             logger.info('POST returning key blob for agent_id: %s', agent_id)
         except Exception as e:
-            web_util.echo_json_response(self, 400, "Error: %s" % e)
+            web_util.echo_json_response(self, 400, f"Error: {str(e)}")
             logger.warning("POST for %s returning 400 response. Error: %s", agent_id, e)
             logger.exception(e)
 
@@ -458,12 +460,13 @@ class UnprotectedHandler(BaseHTTPRequestHandler, SessionManager):
             except NoResultFound as e:
                 raise Exception(
                     "attempting to activate agent before requesting "
-                    "registrar for %s" % agent_id) from e
+                    f"registrar for {agent_id}") from e
             except SQLAlchemyError as e:
                 logger.error('SQLAlchemy Error: %s', e)
                 raise
 
-            if config.STUB_TPM:
+            ex_mac = crypto.do_hmac(agent.key.encode(), agent_id)
+            if ex_mac == auth_tag:
                 try:
                     session.query(RegistrarMain).filter(RegistrarMain.agent_id == agent_id).update(
                         {'active': int(True)})
@@ -472,23 +475,13 @@ class UnprotectedHandler(BaseHTTPRequestHandler, SessionManager):
                     logger.error('SQLAlchemy Error: %s', e)
                     raise
             else:
-                ex_mac = crypto.do_hmac(agent.key.encode(), agent_id)
-                if ex_mac == auth_tag:
-                    try:
-                        session.query(RegistrarMain).filter(RegistrarMain.agent_id == agent_id).update(
-                            {'active': int(True)})
-                        session.commit()
-                    except SQLAlchemyError as e:
-                        logger.error('SQLAlchemy Error: %s', e)
-                        raise
-                else:
-                    raise Exception(
-                        f"Auth tag {auth_tag} does not match expected value {ex_mac}")
+                raise Exception(
+                    f"Auth tag {auth_tag} does not match expected value {ex_mac}")
 
             web_util.echo_json_response(self, 200, "Success")
             logger.info('PUT activated: %s', agent_id)
         except Exception as e:
-            web_util.echo_json_response(self, 400, "Error: %s" % e)
+            web_util.echo_json_response(self, 400, f"Error: {str(e)}")
             logger.warning("PUT for %s returning 400 response. Error: %s", agent_id, e)
             logger.exception(e)
             return

@@ -39,8 +39,9 @@ class DBEngineManager:
         url = config.get(service, 'database_url')
         if url:
             logger.info('database_url is set, using it to establish database connection')
-            engine_args['pool_size'] = int(p_sz)
-            engine_args['max_overflow'] = int(m_ovfl)
+            if not url.count('sqlite:') :
+                engine_args['pool_size'] = int(p_sz)
+                engine_args['max_overflow'] = int(m_ovfl)
 
         else :
             logger.info('database_url is not set, using multi-parameter database configuration options')
@@ -57,7 +58,7 @@ class DBEngineManager:
                 database = config.get(service, p_n_prefix + 'name')
 
             if drivername == 'sqlite':
-                database_file = "%s/%s" % (config.WORK_DIR, database)
+                database_file = os.path.join(config.WORK_DIR, database)
                 kl_dir = os.path.dirname(os.path.abspath(database_file))
                 if not os.path.exists(kl_dir):
                     os.makedirs(kl_dir, 0o700)
@@ -81,6 +82,10 @@ class DBEngineManager:
                 )
                 engine_args['pool_size'] = int(p_sz)
                 engine_args['max_overflow'] = int(m_ovfl)
+
+        # Enable DB debugging
+        if config.DEBUG_DB and config.INSECURE_DEBUG:
+            engine_args['echo'] = True
 
         engine = create_engine(url, **engine_args)
         return engine

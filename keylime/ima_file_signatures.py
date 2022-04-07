@@ -125,8 +125,7 @@ class ImaKeyring:
             pubbytes = pubkey.public_bytes(encoding=serialization.Encoding.X962,
                                            format=fmt)
         else:
-            raise UnsupportedAlgorithm("Unsupported public key type %s" %
-                                       type(pubkey))
+            raise UnsupportedAlgorithm(f"Unsupported public key type {type(pubkey)}")
 
         default_be = backends.default_backend()
         digest = hashes.Hash(hashes.SHA1(), backend=default_be)
@@ -143,7 +142,7 @@ class ImaKeyring:
             keyidv2 = ImaKeyring._get_keyidv2(pubkey)
         # it's unlikely that two different public keys have the same 32 bit keyidv2
         self.ringv2[keyidv2] = pubkey
-        logger.debug("Added key with keyid: 0x%08x" % keyidv2)
+        logger.debug("Added key with keyid: 0x%08x", keyidv2)
 
     def get_pubkey_by_keyidv2(self, keyidv2):
         """ Get a public key object given its keyidv2 """
@@ -160,7 +159,7 @@ class ImaKeyring:
                 pubbytes = pubkey.public_bytes(encoding=serialization.Encoding.DER,
                                                format=fmt)
             except Exception as ex:
-                logger.error("Could not serialize key: %s" % str(ex))
+                logger.error("Could not serialize key: %s", str(ex))
             lst.append(pubbytes)
 
         obj['pubkeys'] = [base64.b64encode(pubkey).decode('ascii') for pubkey in lst]
@@ -208,7 +207,7 @@ class ImaKeyring:
                 pubkey = serialization.load_der_public_key(der_key, backend=default_be)
                 ima_keyring.add_pubkey(pubkey, keyidv2)
             except Exception as ex:
-                logger.error("Could not load a base64-decoded DER key: %s" % str(ex))
+                logger.error("Could not load a base64-decoded DER key: %s", str(ex))
         return ima_keyring
 
 
@@ -323,12 +322,12 @@ class ImaKeyrings:
 
         hashfunc = HASH_FUNCS.get(hash_algo)
         if not hashfunc:
-            logger.warning("Unsupported hash algo with id '%d'" % hash_algo)
+            logger.warning("Unsupported hash algo with id '%d'", hash_algo)
             return False
 
         if filehash_type != hashfunc().name:
-            logger.warning("Mismatching filehash type %s and ima signature hash used %s" %
-                           (filehash_type, hashfunc().name))
+            logger.warning("Mismatching filehash type %s and ima signature hash used %s",
+                           filehash_type, hashfunc().name)
             return False
 
         # Try all the keyrings until we find one with a key with the given keyidv2
@@ -339,7 +338,7 @@ class ImaKeyrings:
                 break
 
         if not pubkey:
-            logger.warning("No key with id 0x%08x available" % keyidv2)
+            logger.warning("No key with id 0x%08x available", keyidv2)
             return False
 
         try:
@@ -367,7 +366,7 @@ class ImaKeyrings:
         if version == 2:
             return self._asymmetric_verify(signature, filehash, filehash_type)
 
-        logger.warning("Malformed signature: wrong version (%d)" % version)
+        logger.warning("Malformed signature: wrong version (%d)", version)
         return False
 
 

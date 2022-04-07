@@ -51,12 +51,12 @@ class TPM_Utilities:
         mask = 0
         for key in list(policy.keys()):
             if not key.isdigit() or int(key) > 24:
-                raise Exception("Invalid tpm policy pcr number: %s" % (key))
+                raise Exception(f"Invalid tpm policy pcr number: {key}")
 
             if int(key) == config.TPM_DATA_PCR:
-                raise Exception("Invalid allowlist PCR number %s, keylime uses this PCR to bind data." % key)
+                raise Exception(f"Invalid allowlist PCR number {key}, keylime uses this PCR to bind data.")
             if int(key) == config.IMA_PCR:
-                raise Exception("Invalid allowlist PCR number %s, this PCR is used for IMA." % key)
+                raise Exception(f"Invalid allowlist PCR number {key}, this PCR is used for IMA.")
 
             mask = mask | (1 << int(key))
 
@@ -67,7 +67,7 @@ class TPM_Utilities:
             # convert all hash values to lowercase
             policy[key] = [x.lower() for x in policy[key]]
 
-        policy['mask'] = "0x%X" % (mask)
+        policy['mask'] = hex(mask)
         return policy
 
 
@@ -125,7 +125,8 @@ class AbstractTPM(metaclass=ABCMeta):
             logger.warning("INSECURE: The security of Keylime is currently NOT linked to a hardware root of trust.")
             logger.warning("INSECURE: Only use Keylime in this mode for testing or debugging purposes.")
 
-    def __read_tpm_data(self):
+    @staticmethod
+    def __read_tpm_data():
         if os.path.exists('tpmdata.yml'):
             with open('tpmdata.yml', 'rb') as f:
                 return yaml.load(f, Loader=SafeLoader)
@@ -140,12 +141,12 @@ class AbstractTPM(metaclass=ABCMeta):
 
     def get_tpm_metadata(self, key):
         if self.global_tpmdata is None:
-            self.global_tpmdata = self.__read_tpm_data()
+            self.global_tpmdata = AbstractTPM.__read_tpm_data()
         return self.global_tpmdata.get(key, None)
 
     def _set_tpm_metadata(self, key, value):
         if self.global_tpmdata is None:
-            self.global_tpmdata = self.__read_tpm_data()
+            self.global_tpmdata = AbstractTPM.__read_tpm_data()
 
         if self.global_tpmdata.get(key, None) is not value:
             self.global_tpmdata[key] = value
@@ -161,7 +162,7 @@ class AbstractTPM(metaclass=ABCMeta):
         pass
 
     @abstractmethod
-    def check_quote(self, agentAttestState, nonce, data, quote, aikTpmFromRegistrar, tpm_policy={}, ima_measurement_list=None, allowlist={}, hash_alg=None, ima_keyrings=None, mb_measurement_list=None, mb_refstate=None, compressed=False):
+    def check_quote(self, agentAttestState, nonce, data, quote, aikTpmFromRegistrar, tpm_policy=None, ima_measurement_list=None, allowlist=None, hash_alg=None, ima_keyrings=None, mb_measurement_list=None, mb_refstate=None, compressed=False):
         pass
 
     def START_HASH(self, algorithm=None):
@@ -196,13 +197,11 @@ class AbstractTPM(metaclass=ABCMeta):
     def _get_tpm_rand_block(self, size=4096):
         pass
 
-    def __check_ima(self, agentAttestState, pcrval, ima_measurement_list, allowlist,
+    @staticmethod
+    def __check_ima(agentAttestState, pcrval, ima_measurement_list, allowlist,
                     ima_keyrings, boot_aggregates, hash_alg):
         failure = Failure(Component.IMA)
         logger.info("Checking IMA measurement list on agent: %s", agentAttestState.get_agent_id())
-        if config.STUB_IMA:
-            pcrval = None
-
         _, ima_failure = ima.process_measurement_list(agentAttestState, ima_measurement_list.split('\n'), allowlist,
                                                       pcrval=pcrval, ima_keyrings=ima_keyrings,
                                                       boot_aggregates=boot_aggregates, hash_alg=hash_alg)
@@ -211,7 +210,8 @@ class AbstractTPM(metaclass=ABCMeta):
             logger.debug("IMA measurement list of agent %s validated", agentAttestState.get_agent_id())
         return failure
 
-    def __parse_pcrs(self, pcrs, virtual) -> typing.Dict[int, str]:
+    @staticmethod
+    def __parse_pcrs(pcrs, virtual) -> typing.Dict[int, str]:
         """Parses and validates the format of a list of PCR data"""
         output = {}
         for line in pcrs:
@@ -241,18 +241,14 @@ class AbstractTPM(metaclass=ABCMeta):
         # convert all pcr num keys to integers
         pcr_allowlist = {int(k): v for k, v in list(pcr_allowlist.items())}
 
-        mb_policy, mb_refstate_data = measured_boot.get_policy(mb_refstate_str)
+        mb_policy, mb_policy_name, mb_refstate_data = measured_boot.get_policy(mb_refstate_str)
         mb_pcrs_hashes, boot_aggregates, mb_measurement_data, mb_failure = self.parse_mb_bootlog(mb_measurement_list, hash_alg)
         failure.merge(mb_failure)
 
         pcrs_in_quote = set()  # PCRs in quote that were already used for some kind of validation
 
-        pcrs = self.__parse_pcrs(pcrs, virtual)
+        pcrs = AbstractTPM.__parse_pcrs(pcrs, virtual)
         pcr_nums = set(pcrs.keys())
-
-        # Skip validation if TPM is stubbed.
-        if config.STUB_TPM:
-            return failure
 
         # Validate data PCR
         if config.TPM_DATA_PCR in pcr_nums and data is not None:
@@ -273,8 +269,8 @@ class AbstractTPM(metaclass=ABCMeta):
                 logger.error("IMA PCR in policy, but no measurement list provided")
                 failure.add_event(f"unused_pcr_{config.IMA_PCR}", "IMA PCR in policy, but no measurement list provided", True)
             else:
-                ima_failure = self.__check_ima(agentAttestState, pcrs[config.IMA_PCR], ima_measurement_list, allowlist,
-                                               ima_keyrings, boot_aggregates, hash_alg)
+                ima_failure = AbstractTPM.__check_ima(agentAttestState, pcrs[config.IMA_PCR], ima_measurement_list, allowlist,
+                                                      ima_keyrings, boot_aggregates, hash_alg)
                 failure.merge(ima_failure)
 
             pcrs_in_quote.add(config.IMA_PCR)
@@ -331,10 +327,10 @@ class AbstractTPM(metaclass=ABCMeta):
         missing = set(pcr_allowlist.keys()) - pcrs_in_quote
         if len(missing) > 0:
             logger.error("%sPCRs specified in policy not in quote: %s", ("", "v")[virtual], missing)
-            failure.add_event("missing_pcrs", {"context": "PCRs are missing in quote", "data": missing}, True)
+            failure.add_event("missing_pcrs", {"context": "PCRs are missing in quote", "data": list(missing)}, True)
 
         if not mb_failure and mb_refstate_data:
-            mb_policy_failure = measured_boot.evaluate_policy(mb_policy, mb_refstate_data, mb_measurement_data,
+            mb_policy_failure = measured_boot.evaluate_policy(mb_policy, mb_policy_name, mb_refstate_data, mb_measurement_data,
                                                     pcrs_in_quote, ("", "v")[virtual], agentAttestState.get_agent_id())
             failure.merge(mb_policy_failure)
 
