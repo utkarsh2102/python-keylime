@@ -37,7 +37,7 @@ from keylime import ca_util
 from keylime.common import algorithms, validators
 from keylime import ima_file_signatures
 from keylime import measured_boot
-from keylime import gpg
+from keylime import signing
 from keylime import api_version as keylime_api_version
 
 # setup logging
@@ -111,32 +111,37 @@ class Tenant():
 
         self.api_version = keylime_api_version.current_version()
 
-        (self.my_cert, self.my_priv_key), (self.my_agent_cert, self.my_agent_priv_key) = self.get_tls_context()
+        (self.my_cert, self.my_priv_key), (self.my_agent_cert, self.my_agent_priv_key), self.verifier_ca_cert = Tenant.get_tls_context()
         self.cert = (self.my_cert, self.my_priv_key)
         self.agent_cert = (self.my_agent_cert, self.my_agent_priv_key)
         if config.getboolean('general', "enable_tls"):
-            self.tls_enabled = True
+            self.tls_cv_enabled = True
         else:
-            self.tls_enabled = False
+            self.tls_cv_enabled = False
             self.cert = ""
             logger.warning(
                 "Warning: TLS is currently disabled, keys will be sent in the clear! This should only be used for testing.")
+        self.tls_agent_enabled = True
+        self.verify_custom = None
 
     @property
     def verifier_base_url(self):
         return f'{self.verifier_ip}:{self.verifier_port}'
 
-    def get_tls_context(self):
+    @staticmethod
+    def get_tls_context():
         """Generate certifcate naming and path
 
         Returns:
             string -- my_cert (client_cert), my_priv_key (client private key)
         """
+        verifier_ca_cert = config.get('tenant', 'ca_cert')
         my_cert = config.get('tenant', 'my_cert')
         my_priv_key = config.get('tenant', 'private_key')
         tls_dir = config.get('tenant', 'tls_dir')
 
         if tls_dir == 'default':
+            verifier_ca_cert = 'cacert.crt'
             my_cert = 'client-cert.crt'
             my_priv_key = 'client-private.pem'
             tls_dir = 'cv_ca'
@@ -145,20 +150,24 @@ class Tenant():
             tls_dir = os.path.abspath(os.path.join(config.WORK_DIR, tls_dir))
 
         logger.info("Setting up client TLS in %s", tls_dir)
+        verifier_ca_cert = os.path.join(tls_dir, verifier_ca_cert)
         my_cert = os.path.join(tls_dir, my_cert)
         my_priv_key = os.path.join(tls_dir, my_priv_key)
 
         tls_context = (my_cert, my_priv_key)
 
+        agent_mtls_context = (None, None)
         # Check for user defined CA to connect to agent
-        agent_mtls_cert = config.get("cloud_verifier", "agent_mtls_cert", fallback=None)
-        agent_mtls_private_key = config.get("cloud_verifier", "agent_mtls_private_key", fallback=None)
+        agent_mtls_cert_enabled = config.getboolean('tenant', 'agent_mtls_cert_enabled', fallback=False)
 
-        agent_mtls_context = tls_context
-        if agent_mtls_cert != "CV":
-            agent_mtls_context = (agent_mtls_cert, agent_mtls_private_key)
+        if agent_mtls_cert_enabled:
+            agent_mtls_cert = config.get("cloud_verifier", "agent_mtls_cert", fallback=None)
+            agent_mtls_private_key = config.get("cloud_verifier", "agent_mtls_private_key", fallback=None)
+            agent_mtls_context = tls_context
+            if agent_mtls_cert != "CV":
+                agent_mtls_context = (agent_mtls_cert, agent_mtls_private_key)
 
-        return tls_context, agent_mtls_context
+        return tls_context, agent_mtls_context, verifier_ca_cert
 
     def process_allowlist(self, args):
         # Set up PCR values
@@ -176,16 +185,14 @@ class Tenant():
 
         if len(args.get("ima_sign_verification_keys")) > 0:
             # Auto-enable IMA (or-bit mask)
-            self.tpm_policy['mask'] = "0x%X" % (
-                    int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
+            self.tpm_policy['mask'] = hex(int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
 
             # Add all IMA file signing verification keys to a keyring
             tenant_keyring = ima_file_signatures.ImaKeyring()
             for filename in args["ima_sign_verification_keys"]:
                 pubkey, keyidv2 = ima_file_signatures.get_pubkey_from_file(filename)
                 if not pubkey:
-                    raise UserError(
-                        "File '%s' is not a file with a key" % filename)
+                    raise UserError(f"File '{filename}' is not a file with a key")
                 tenant_keyring.add_pubkey(pubkey, keyidv2)
             self.ima_sign_verification_keys = tenant_keyring.to_string()
 
@@ -197,13 +204,15 @@ class Tenant():
             self.enforce_pcrs(list(self.tpm_policy.keys()), [ config.IMA_PCR ], "IMA")
 
             # Auto-enable IMA (or-bit mask)
-            self.tpm_policy['mask'] = "0x%X" % (
-                    int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
+            self.tpm_policy['mask'] = hex(int(self.tpm_policy['mask'], 0) | (1 << config.IMA_PCR))
 
             if isinstance(args["allowlist"], str):
                 if args["allowlist"] == "default":
                     args["allowlist"] = config.get('tenant', 'allowlist')
-                al_data = ima.read_allowlist(args["allowlist"], args["allowlist_checksum"], args["allowlist_sig"], args["allowlist_sig_key"])
+                try:
+                    al_data = ima.read_allowlist(args["allowlist"], args["allowlist_checksum"], args["allowlist_sig"], args["allowlist_sig_key"])
+                except Exception as ima_e:
+                    raise UserError(str(ima_e)) from ima_e
             elif isinstance(args["allowlist"], list):
                 al_data = args["allowlist"]
             else:
@@ -236,9 +245,8 @@ class Tenant():
             self.enforce_pcrs(list(self.tpm_policy.keys()), config.MEASUREDBOOT_PCRS, "measured boot")
 
             # Auto-enable TPM event log mesured boot (or-bit mask)
-            for _pcr in config.MEASUREDBOOT_PCRS :
-                self.tpm_policy['mask'] = "0x%X" % (
-                    int(self.tpm_policy['mask'], 0) | (1 << _pcr))
+            for _pcr in config.MEASUREDBOOT_PCRS:
+                self.tpm_policy['mask'] = hex(int(self.tpm_policy['mask'], 0) | (1 << _pcr))
 
             logger.info("TPM PCR Mask automatically modified is %s to include IMA/Event log PCRs", self.tpm_policy['mask'])
 
@@ -268,6 +276,9 @@ class Tenant():
 
         registrar_client.init_client_tls("tenant")
         self.registrar_data = registrar_client.getData(self.registrar_ip, self.registrar_port, self.agent_uuid)
+
+        if self.registrar_data is None:
+            raise UserError(f"Agent ${self.agent_uuid} data not found in the Registrar.")
 
         # try to get the port or ip from the registrar if it is missing
         if (self.agent_ip is None or self.agent_port is None) and self.registrar_data is not None:
@@ -299,8 +310,18 @@ class Tenant():
                 self.supported_version = "1.0"
             else:
                 # Try to connect to the agent to get supported version
-                with RequestsClient(f"{self.agent_ip}:{self.agent_port}", tls_enabled=True, cert=self.agent_cert,
-                                    ignore_hostname=True, verify_custom=self.registrar_data['mtls_cert']) as get_version:
+                if self.registrar_data['mtls_cert'] == "disabled":
+                    self.tls_agent_enabled = False
+                    self.verify_custom = False
+                    logger.warning(
+                        "Warning: mTLS for agents is disabled: the identity of each node will be based on the properties of the TPM only. "
+                        "Unless you have strict control of your network, it is strongly advised that remote code execution should be disabled, "
+                        "by setting \"payload_script=\" and \"extract_payload_zip=False\" under \"[cloud_agent]\"")
+                else:
+                    self.verify_custom = self.registrar_data['mtls_cert']
+
+                with RequestsClient(f"{self.agent_ip}:{self.agent_port}", tls_enabled=self.tls_agent_enabled, cert=self.agent_cert,
+                                    ignore_hostname=True, verify_custom=self.verify_custom) as get_version:
                     res = get_version.get("/version")
                     if res and res.status_code == 200:
                         try:
@@ -368,7 +389,7 @@ class Tenant():
                 else:
                     raise UserError("Invalid key file provided")
             else:
-                f = open(args["keyfile"], encoding="utf-8")
+                f = open(args["keyfile"], encoding="utf-8")  #pylint: disable=consider-using-with
             self.K = base64.b64decode(f.readline())
             self.U = base64.b64decode(f.readline())
             self.V = base64.b64decode(f.readline())
@@ -380,9 +401,8 @@ class Tenant():
                     self.payload = args["payload"]["data"][0]
             else:
                 if args["payload"] is not None:
-                    f = open(args["payload"], 'rb')
-                    self.payload = f.read()
-                    f.close()
+                    with open(args["payload"], 'rb') as f:
+                        self.payload = f.read()
 
         if args["file"] is not None:
             if args["keyfile"] is not None or args["ca_dir"] is not None:
@@ -418,7 +438,7 @@ class Tenant():
             if "ca_dir_pw" in args and args["ca_dir_pw"] is not None:
                 ca_util.setpassword(args["ca_dir_pw"])
 
-            if not os.path.exists(args["ca_dir"]) or not os.path.exists("%s/cacert.crt" % args["ca_dir"]):
+            if not os.path.exists(args["ca_dir"]) or not os.path.exists(os.path.join(args["ca_dir"], "cacert.crt")):
                 logger.warning("CA directory does not exist. Creating...")
                 ca_util.cmd_init(args["ca_dir"])
             if not os.path.exists(
@@ -430,7 +450,7 @@ class Tenant():
                 args["ca_dir"], self.agent_uuid)
 
             # support revocation
-            if not os.path.exists("%s/RevocationNotifier-private.pem" % args["ca_dir"]):
+            if not os.path.exists(os.path.join(args["ca_dir"], "RevocationNotifier-private.pem")):
                 ca_util.cmd_mkcert(args["ca_dir"], "RevocationNotifier")
             rev_package, _, _ = ca_util.cmd_certpkg(
                 args["ca_dir"], "RevocationNotifier")
@@ -480,8 +500,7 @@ class Tenant():
             self.payload = ret['ciphertext']
 
         if self.payload is not None and len(self.payload) > config.getint('tenant', 'max_payload_size'):
-            raise UserError("Payload size %s exceeds max size %d" % (
-                len(self.payload), config.getint('tenant', 'max_payload_size')))
+            raise UserError(f"Payload size {len(self.payload)} exceeds max size {config.getint('tenant', 'max_payload_size')}")
 
     def enforce_pcrs(self, policy_pcrs, protected_pcrs, pcr_use) :
         policy_pcrs = list(self.tpm_policy.keys())
@@ -513,9 +532,7 @@ class Tenant():
             [type] -- [description]
         """
         if config.getboolean('tenant', 'require_ek_cert'):
-            if config.STUB_TPM:
-                logger.debug("Not checking ekcert due to STUB_TPM mode")
-            elif ekcert == 'emulator' and config.DISABLE_EK_CERT_CHECK_EMULATOR:
+            if ekcert == 'emulator' and config.DISABLE_EK_CERT_CHECK_EMULATOR:
                 logger.info("Not checking ekcert of TPM emulator")
             elif ekcert is None:
                 logger.warning("No EK cert provided, require_ek_cert option in config set to True")
@@ -557,7 +574,7 @@ class Tenant():
         if self.registrar_data['regcount'] > 1:
             logger.warning("WARNING: This UUID had more than one ek-ekcert registered to it! This might indicate that your system is misconfigured. Run 'regdelete' for this agent and restart")
 
-        if not config.STUB_TPM and (not config.getboolean('tenant', 'require_ek_cert') and config.get('tenant', 'ek_check_script') == ""):
+        if not config.getboolean('tenant', 'require_ek_cert') and config.get('tenant', 'ek_check_script') == "":
             logger.warning(
                 "DANGER: EK cert checking is disabled and no additional checks on EKs have been specified with ek_check_script option. Keylime is not secure!!")
 
@@ -594,18 +611,18 @@ class Tenant():
             env['EK_CERT'] = ""
 
         env['PROVKEYS'] = json.dumps(self.registrar_data.get('provider_keys', {}))
-        proc = subprocess.Popen(script, env=env, shell=True,
-                                cwd=config.WORK_DIR, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT)
-        retval = proc.wait()
-        if retval != 0:
-            raise UserError("External check script failed to validate EK")
-        logger.debug("External check script successfully to validated EK")
-        while True:
-            line = proc.stdout.readline().decode()
-            if line == "":
-                break
-            logger.debug("ek_check output: %s", line.strip())
+        with subprocess.Popen(script, env=env, shell=True,
+                              cwd=config.WORK_DIR, stdout=subprocess.PIPE,
+                              stderr=subprocess.STDOUT) as proc:
+            retval = proc.wait()
+            if retval != 0:
+                raise UserError("External check script failed to validate EK")
+            logger.debug("External check script successfully to validated EK")
+            while True:
+                line = proc.stdout.readline().decode()
+                if line == "":
+                    break
+                logger.debug("ek_check output: %s", line.strip())
         return True
 
     def do_cv(self):
@@ -630,12 +647,12 @@ class Tenant():
             'supported_version': self.supported_version,
         }
         json_message = json.dumps(data)
-        do_cv = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        do_cv = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         response = do_cv.post(
             (f'/v{self.api_version}/agents/{self.agent_uuid}'),
             data=json_message,
             cert=self.cert,
-            verify=False
+            verify=self.verifier_ca_cert
         )
 
         if response.status_code == 503:
@@ -658,12 +675,12 @@ class Tenant():
     def do_cvstatus(self):
         """Perform operational state look up for agent on the verifier"""
 
-        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
 
         response = do_cvstatus.get(
             (f'/v{self.api_version}/agents/{self.agent_uuid}'),
             cert=self.cert,
-            verify=False
+            verify=self.verifier_ca_cert
         )
 
         if response.status_code == 503:
@@ -686,7 +703,7 @@ class Tenant():
                 response['results'][self.agent_uuid]['operational_state'])
             response['results'][self.agent_uuid]['operational_state'] = operational_state
 
-            logger.info("Agent Info:\n%s" % json.dumps(response["results"]))
+            logger.info("Agent Info:\n%s", json.dumps(response["results"]))
 
             return response
 
@@ -699,14 +716,14 @@ class Tenant():
     def do_cvlist(self):
         """List all agent statuses in cloudverifier"""
 
-        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         verifier_id = ""
         if self.verifier_id is not None:
             verifier_id = self.verifier_id
         response = do_cvstatus.get(
             (f'/v{self.api_version}/agents/?verifier={verifier_id}'),
             cert=self.cert,
-            verify=False
+            verify=self.verifier_ca_cert
         )
 
         if response.status_code == 503:
@@ -736,7 +753,7 @@ class Tenant():
     def do_cvbulkinfo(self):
         """Perform operational state look up for agent"""
 
-        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        do_cvstatus = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
 
         verifier_id = ""
         if self.verifier_id is not None:
@@ -744,7 +761,7 @@ class Tenant():
         response = do_cvstatus.get(
             (f'/v{self.api_version}/agents/?bulk={True}&verifier={verifier_id}'),
             cert=self.cert,
-            verify=False
+            verify=self.verifier_ca_cert
         )
 
         if response.status_code == 503:
@@ -764,7 +781,7 @@ class Tenant():
                 response["results"][agent]["operational_state"] = \
                     states.state_to_str(response["results"][agent][
                                             "operational_state"])
-            logger.info("Bulk Agent Info:\n%s" % json.dumps(response["results"]))
+            logger.info("Bulk Agent Info:\n%s", json.dumps(response["results"]))
 
             return response
 
@@ -790,11 +807,11 @@ class Tenant():
             self.verifier_ip = cvresponse['results'][self.agent_uuid]["verifier_ip"]
             self.verifier_port = cvresponse['results'][self.agent_uuid]["verifier_port"]
 
-        do_cvdelete = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        do_cvdelete = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         response = do_cvdelete.delete(
             (f'/v{self.api_version}/agents/{self.agent_uuid}'),
             cert=self.cert,
-            verify=False
+            verify=self.verifier_ca_cert
         )
 
         response = response.json()
@@ -809,11 +826,11 @@ class Tenant():
             deleted = False
             for _ in range(12):
                 get_cvdelete = RequestsClient(
-                    self.verifier_base_url, self.tls_enabled)
+                    self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
                 response = get_cvdelete.get(
                     (f'/v{self.api_version}/agents/{self.agent_uuid}'),
                     cert=self.cert,
-                    verify=False
+                    verify=self.verifier_ca_cert
                 )
 
                 if response.status_code == 404:
@@ -843,20 +860,17 @@ class Tenant():
             logger.info(
                 "Agent %s does not exist on the registrar. Please register the agent with the registrar.",
                 self.agent_uuid)
-            response = {}
-            response['code'] = 404
-            response['status'] = "Agent {0} does not exist on " \
-                                 "registrar {1} port {2}.".format(
-                self.agent_uuid, self.registrar_ip, self.registrar_port)
-            response['results'] = {}
-            logger.info(json.dumps((response)))
+            response = {'code': 404,
+                        'status': f"Agent {self.agent_uuid} does not exist on "
+                                  f"registrar {self.registrar_ip} port {self.registrar_port}.",
+                        'results': {}}
+            logger.info(json.dumps(response))
             return response
 
-        response = {}
-        response['code'] = 200
-        response['status'] = "Agent {0} exists on registrar {1} port {2}.".format(
-                self.agent_uuid, self.registrar_ip, self.registrar_port)
-        response['results'] = {}
+        response = {'code': 200,
+                    'status': f"Agent {self.agent_uuid} exists on "
+                              f"registrar {self.registrar_ip} port {self.registrar_port}.",
+                    'results': {}}
         response['results'][self.agent_uuid] = agent_info
         response['results'][self.agent_uuid]['operational_state'] = \
             states.state_to_str(states.REGISTERED)
@@ -922,12 +936,12 @@ class Tenant():
             self.verifier_port = agent_json['results'][self.agent_uuid]['verifier_port']
 
         do_cvreactivate = RequestsClient(
-            self.verifier_base_url, self.tls_enabled)
+            self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         response = do_cvreactivate.put(
             f'/v{self.api_version}/agents/{self.agent_uuid}/reactivate',
             data=b'',
             cert=self.cert,
-            verify=False
+            verify=self.verifier_ca_cert
         )
 
         if response.status_code == 503:
@@ -950,12 +964,12 @@ class Tenant():
         """ Stop declared active agent
         """
         params = f'/v{self.api_version}/agents/{self.agent_uuid}/stop'
-        do_cvstop = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        do_cvstop = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         response = do_cvstop.put(
             params,
             cert=self.cert,
             data=b'',
-            verify=False
+            verify=self.verifier_ca_cert
         )
 
         if response.status_code == 503:
@@ -989,8 +1003,8 @@ class Tenant():
                 cloudagent_base_url = f'{self.agent_ip}:{self.agent_port}'
 
                 if self.registrar_data['mtls_cert']:
-                    with RequestsClient(cloudagent_base_url, tls_enabled=True, ignore_hostname=True, cert=self.agent_cert,
-                                        verify_custom=self.registrar_data['mtls_cert']) as do_quote:
+                    with RequestsClient(cloudagent_base_url, tls_enabled=self.tls_agent_enabled, ignore_hostname=True, cert=self.agent_cert,
+                                        verify_custom=self.verify_custom) as do_quote:
                         response = do_quote.get(params)
                 else:
                     logger.warning("Connecting to agent without using mTLS!")
@@ -1018,106 +1032,103 @@ class Tenant():
                 raise e
             break
 
-        try:
-            if response is not None and response.status_code != 200:
-                raise UserError(
-                    "Status command response: %d Unexpected response from Cloud Agent." % response.status)
+        if response is not None and response.status_code != 200:
+            raise UserError(
+               f"Status command response: {response.status_code} Unexpected response from Cloud Agent.")
 
-            if "results" not in response_body:
-                raise UserError(
-                    "Error: unexpected http response body from Cloud Agent: %s" % str(response.status))
+        if "results" not in response_body:
+            raise UserError(
+                f"Error: unexpected http response body from Cloud Agent: {str(response.status)}")
 
-            quote = response_body["results"]["quote"]
-            logger.debug("Agent_quote received quote: %s", quote)
+        quote = response_body["results"]["quote"]
+        logger.debug("Agent_quote received quote: %s", quote)
 
-            public_key = response_body["results"]["pubkey"]
-            logger.debug("Agent_quote received public key: %s", public_key)
+        public_key = response_body["results"]["pubkey"]
+        logger.debug("Agent_quote received public key: %s", public_key)
 
-            # Ensure hash_alg is in accept_tpm_hash_algs list
-            hash_alg = response_body["results"]["hash_alg"]
-            logger.debug("Agent_quote received hash algorithm: %s", hash_alg)
-            if not algorithms.is_accepted(hash_alg, config.get('tenant', 'accept_tpm_hash_algs').split(','))\
-                    or not algorithms.Hash.is_recognized(hash_alg):
-                raise UserError(
-                    "TPM Quote is using an unaccepted hash algorithm: %s" % hash_alg)
+        # Ensure hash_alg is in accept_tpm_hash_algs list
+        hash_alg = response_body["results"]["hash_alg"]
+        logger.debug("Agent_quote received hash algorithm: %s", hash_alg)
+        if not algorithms.is_accepted(hash_alg, config.get('tenant', 'accept_tpm_hash_algs').split(','))\
+                or not algorithms.Hash.is_recognized(hash_alg):
+            raise UserError(
+                f"TPM Quote is using an unaccepted hash algorithm: {hash_alg}")
 
-            # Ensure enc_alg is in accept_tpm_encryption_algs list
-            enc_alg = response_body["results"]["enc_alg"]
-            logger.debug("Agent_quote received encryption algorithm: %s", enc_alg)
-            if not algorithms.is_accepted(enc_alg, config.get('tenant', 'accept_tpm_encryption_algs').split(',')):
-                raise UserError(
-                    "TPM Quote is using an unaccepted encryption algorithm: %s" % enc_alg)
+        # Ensure enc_alg is in accept_tpm_encryption_algs list
+        enc_alg = response_body["results"]["enc_alg"]
+        logger.debug("Agent_quote received encryption algorithm: %s", enc_alg)
+        if not algorithms.is_accepted(enc_alg, config.get('tenant', 'accept_tpm_encryption_algs').split(',')):
+            raise UserError(
+                f"TPM Quote is using an unaccepted encryption algorithm: {enc_alg}")
 
-            # Ensure sign_alg is in accept_tpm_encryption_algs list
-            sign_alg = response_body["results"]["sign_alg"]
-            logger.debug("Agent_quote received signing algorithm: %s", sign_alg)
-            if not algorithms.is_accepted(sign_alg, config.get('tenant', 'accept_tpm_signing_algs').split(',')):
-                raise UserError(
-                    "TPM Quote is using an unaccepted signing algorithm: %s" % sign_alg)
+        # Ensure sign_alg is in accept_tpm_encryption_algs list
+        sign_alg = response_body["results"]["sign_alg"]
+        logger.debug("Agent_quote received signing algorithm: %s", sign_alg)
+        if not algorithms.is_accepted(sign_alg, config.get('tenant', 'accept_tpm_signing_algs').split(',')):
+            raise UserError(
+                f"TPM Quote is using an unaccepted signing algorithm: {sign_alg}")
 
-            if not self.validate_tpm_quote(public_key, quote, algorithms.Hash(hash_alg)):
-                raise UserError(
-                    "TPM Quote from cloud agent is invalid for nonce: %s" % self.nonce)
+        if not self.validate_tpm_quote(public_key, quote, algorithms.Hash(hash_alg)):
+            raise UserError(
+                f"TPM Quote from cloud agent is invalid for nonce: {self.nonce}")
 
-            logger.info("Quote from %s validated", self.agent_ip)
+        logger.info("Quote from %s validated", self.agent_ip)
 
-            # encrypt U with the public key
-            encrypted_U = crypto.rsa_encrypt(
-                crypto.rsa_import_pubkey(public_key), self.U)
+        # encrypt U with the public key
+        encrypted_U = crypto.rsa_encrypt(
+            crypto.rsa_import_pubkey(public_key), self.U)
 
-            b64_encrypted_u = base64.b64encode(encrypted_U)
-            logger.debug("b64_encrypted_u: %s", b64_encrypted_u.decode('utf-8'))
-            data = {
-                'encrypted_key': b64_encrypted_u.decode('utf-8'),
-                'auth_tag': self.auth_tag
-            }
+        b64_encrypted_u = base64.b64encode(encrypted_U)
+        logger.debug("b64_encrypted_u: %s", b64_encrypted_u.decode('utf-8'))
+        data = {
+            'encrypted_key': b64_encrypted_u.decode('utf-8'),
+            'auth_tag': self.auth_tag
+        }
 
-            if self.payload is not None:
-                data['payload'] = self.payload.decode('utf-8')
+        if self.payload is not None:
+            data['payload'] = self.payload.decode('utf-8')
 
 
-            # post encrypted U back to CloudAgent
-            params = f'/v{self.supported_version}/keys/ukey'
-            cloudagent_base_url = (
-                f'{self.agent_ip}:{self.agent_port}'
-            )
+        # post encrypted U back to CloudAgent
+        params = f'/v{self.supported_version}/keys/ukey'
+        cloudagent_base_url = (
+            f'{self.agent_ip}:{self.agent_port}'
+        )
 
-            if self.registrar_data['mtls_cert']:
-                with RequestsClient(cloudagent_base_url, tls_enabled=True, ignore_hostname=True, cert=self.agent_cert,
-                                    verify_custom=self.registrar_data['mtls_cert']) as post_ukey:
-                    response = post_ukey.post(params, json=data)
-            else:
-                logger.warning("Connecting to agent without using mTLS!")
-                post_ukey = RequestsClient(cloudagent_base_url, tls_enabled=False)
+        if self.registrar_data['mtls_cert']:
+            with RequestsClient(cloudagent_base_url, tls_enabled=self.tls_agent_enabled, ignore_hostname=True, cert=self.agent_cert,
+                                verify_custom=self.verify_custom) as post_ukey:
                 response = post_ukey.post(params, json=data)
+        else:
+            logger.warning("Connecting to agent without using mTLS!")
+            post_ukey = RequestsClient(cloudagent_base_url, tls_enabled=False)
+            response = post_ukey.post(params, json=data)
 
-            if response.status_code == 503:
-                logger.error("Cannot connect to Agent at %s with Port %s. Connection refused.", self.agent_ip, self.agent_port)
-                sys.exit()
-            elif response.status_code == 504:
-                logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
-                sys.exit()
+        if response.status_code == 503:
+            logger.error("Cannot connect to Agent at %s with Port %s. Connection refused.", self.agent_ip, self.agent_port)
+            sys.exit()
+        elif response.status_code == 504:
+            logger.error("Verifier at %s with Port %s timed out.", self.verifier_ip, self.verifier_port)
+            sys.exit()
 
-            if response.status_code != 200:
-                keylime_logging.log_http_response(
-                    logger, logging.ERROR, response_body)
-                raise UserError(
-                    "Posting of Encrypted U to the Cloud Agent failed with response code %d (%s)" % (response.status_code, response.text))
-        except Exception as e:
-            self.do_cvstop()
-            raise e
+        if response.status_code != 200:
+            keylime_logging.log_http_response(
+                logger, logging.ERROR, response_body)
+            raise UserError(
+                f"Posting of Encrypted U to the Cloud Agent failed with response code {response.status_code} ({response.text})")
 
     def do_verify(self):
         """ Perform verify using a random generated challenge
         """
         challenge = TPM_Utilities.random_password(20)
         numtries = 0
+
         while True:
+            response = None
             try:
                 cloudagent_base_url = (
                     f'{self.agent_ip}:{self.agent_port}'
                 )
-
 
                 if self.registrar_data['mtls_cert']:
                     with RequestsClient(cloudagent_base_url, tls_enabled=True, ignore_hostname=True,
@@ -1128,12 +1139,14 @@ class Tenant():
                     do_verify = RequestsClient(cloudagent_base_url, tls_enabled=False)
                     response = do_verify.get(f'/v{self.supported_version}/keys/verify?challenge={challenge}')
 
+                response_body = response.json()
             except Exception as e:
-                if response.status_code in (503, 504):
+                if response is not None and response.status_code in (503, 504):
                     numtries += 1
                     maxr = config.getint('tenant', 'max_retries')
                     if numtries >= maxr:
                         logger.error("Cannot establish connection to agent on %s with port %s", self.agent_ip, self.agent_port)
+                        self.do_cvstop()
                         sys.exit()
                     interval = config.getfloat('tenant', 'retry_interval')
                     exponential_backoff = config.getboolean('tenant', 'exponential_backoff')
@@ -1142,12 +1155,12 @@ class Tenant():
                         self.agent_ip, numtries, maxr, next_retry)
                     time.sleep(next_retry)
                     continue
-
+                self.do_cvstop()
                 raise e
-            response_body = response.json()
             if response.status_code == 200:
                 if "results" not in response_body or 'hmac' not in response_body['results']:
                     logger.critical("Error: unexpected http response body from Cloud Agent: %s", response.status_code)
+                    self.do_cvstop()
                     break
                 mac = response_body['results']['hmac']
 
@@ -1157,12 +1170,22 @@ class Tenant():
                     logger.info("Key derivation successful")
                 else:
                     logger.error("Key derivation failed")
+                    self.do_cvstop()
             else:
                 keylime_logging.log_http_response(
                     logger, logging.ERROR, response_body)
+                numtries += 1
+                maxr = config.getint('tenant', 'max_retries')
+                if numtries >= maxr:
+                    logger.error("Agent on %s with port %s failed key derivation", self.agent_ip, self.agent_port)
+                    self.do_cvstop()
+                    sys.exit()
                 interval = config.getfloat('tenant', 'retry_interval')
-                logger.warning("Key derivation not yet complete...trying again in %s seconds...Ctrl-C to stop", interval)
-                time.sleep(interval)
+                exponential_backoff = config.getboolean('tenant', 'exponential_backoff')
+                next_retry = retry.retry_time(exponential_backoff, interval, numtries, logger)
+                logger.info("Key derivation not yet complete (retry %s/%s), trying again in %s seconds... (Ctrl-C to stop)",
+                    numtries, maxr, next_retry)
+                time.sleep(next_retry)
                 continue
             break
 
@@ -1178,32 +1201,40 @@ class Tenant():
             'allowlist': json.dumps(self.allowlist)
         }
         body = json.dumps(data)
-        cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        cv_client = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         response = cv_client.post(f'/v{self.api_version}/allowlists/{allowlist_name}', data=body,
-                                  cert=self.cert, verify=False)
-        print(response.json())
+                                  cert=self.cert, verify=self.verifier_ca_cert)
+        Tenant._print_json_response(response)
 
     def do_delete_allowlist(self, name):
-        cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        cv_client = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         response = cv_client.delete(f'/v{self.api_version}/allowlists/{name}',
-                                    cert=self.cert, verify=False)
-        print(response.json())
+                                    cert=self.cert, verify=self.verifier_ca_cert)
+        Tenant._print_json_response(response)
 
     def do_show_allowlist(self, name):
-        cv_client = RequestsClient(self.verifier_base_url, self.tls_enabled)
+        cv_client = RequestsClient(self.verifier_base_url, self.tls_cv_enabled, ignore_hostname=True)
         response = cv_client.get(f'/v{self.api_version}/allowlists/{name}',
-                                 cert=self.cert, verify=False)
+                                 cert=self.cert, verify=self.verifier_ca_cert)
         print(f"Show allowlist command response: {response.status_code}.")
-        print(response.json())
+        Tenant._print_json_response(response)
+
+    @staticmethod
+    def _print_json_response(response):
+        try:
+            json_response = response.json()
+        except ValueError:
+            json_response = '{}'
+        print(json_response)
 
 
 def write_to_namedtempfile(data, delete_tmp_files):
-    temp = tempfile.NamedTemporaryFile(prefix="keylime-", delete=delete_tmp_files)
+    temp = tempfile.NamedTemporaryFile(prefix="keylime-", delete=delete_tmp_files)  #pylint: disable=consider-using-with
     temp.write(data)
     temp.flush()
     return temp.name
 
-def main(argv=sys.argv):
+def main(argv=sys.argv):  #pylint: disable=dangerous-default-value
     """[summary]
 
     Keyword Arguments:
@@ -1268,7 +1299,7 @@ def main(argv=sys.argv):
     parser.add_argument('--mb_refstate', action='store', dest='mb_refstate',
                         default=None, help="Specify the location of a measure boot reference state (intended state)")
     parser.add_argument('--allowlist-checksum', action='store', dest='allowlist_checksum',
-                        default=None, help="Specify the SHA2 checksum of an allowlist")
+                        default=None, help="Specify the SHA-256 checksum of an allowlist")
     parser.add_argument('--allowlist-sig', action='store', dest='allowlist_sig',
                         default=None, help="Specify the GPG signature file of an allowlist")
     parser.add_argument('--allowlist-sig-key', action='store', dest='allowlist_sig_key',
@@ -1322,16 +1353,6 @@ def main(argv=sys.argv):
         logger.warning("Using default UUID d432fbb3-d2f1-4a97-9ef7-75bd81c00000")
         mytenant.agent_uuid = "d432fbb3-d2f1-4a97-9ef7-75bd81c00000"
 
-    if config.STUB_VTPM and config.TPM_CANNED_VALUES is not None:
-        # Use canned values for agent UUID
-        jsonIn = config.TPM_CANNED_VALUES
-        if "add_vtpm_to_group" in jsonIn:
-            mytenant.agent_uuid = jsonIn['add_vtpm_to_group']['retout']
-        else:
-            # Our command hasn't been canned!
-            raise UserError("Command %s not found in canned JSON!" %
-                            ("add_vtpm_to_group"))
-
     if args.verifier_id is not None:
         mytenant.verifier_id = args.verifier_id
     if args.verifier_ip is not None:
@@ -1345,7 +1366,7 @@ def main(argv=sys.argv):
         mytenant.registrar_port = args.registrar_port
 
     # we only need to fetch remote files if we are adding or updating
-    if args.command in ['add', 'update']:
+    if args.command in ['add', 'update', 'addallowlist']:
         delete_tmp_files = logger.level > logging.DEBUG # delete tmp files unless in DEBUG mode
 
         if args.allowlist_url:
@@ -1353,7 +1374,7 @@ def main(argv=sys.argv):
             response = requests.get(args.allowlist_url, allow_redirects=False)
             if response.status_code == 200:
                 args.allowlist = write_to_namedtempfile(response.content, delete_tmp_files)
-                logger.debug("Allowlist temporarily saved in %s" % args.allowlist)
+                logger.debug("Allowlist temporarily saved in %s", args.allowlist)
             else:
                 raise Exception(f"Downloading allowlist ({args.allowlist_url}) failed with status code {response.status_code}!")
 
@@ -1372,12 +1393,12 @@ def main(argv=sys.argv):
                 break
             keysig_file = args.ima_sign_verification_key_sigs[i]
             if len(args.ima_sign_verification_key_sig_keys) == 0:
-                raise UserError("A gpg key is missing for key signature file '%s'" % keysig_file)
+                raise UserError(f"A gpg key is missing for key signature file '{keysig_file}'")
 
             gpg_key_file = args.ima_sign_verification_key_sig_keys[i]
-            gpg.gpg_verify_filesignature(gpg_key_file, key_file, keysig_file, "IMA file signing key")
+            signing.verify_signature_from_file(gpg_key_file, key_file, keysig_file, "IMA file signing key")
 
-            logger.info("Signature verification on %s was successful" % key_file)
+            logger.info("Signature verification on %s was successful", key_file)
 
         # verify all the remote keys for which we have a signature URL and key to to verify
         # Append the downloaded key files to args.ima_sign_verification_keys
@@ -1388,7 +1409,7 @@ def main(argv=sys.argv):
             if response.status_code == 200:
                 key_file = write_to_namedtempfile(response.content, delete_tmp_files)
                 args.ima_sign_verification_keys.append(key_file)
-                logger.debug("Key temporarily saved in %s" % key_file)
+                logger.debug("Key temporarily saved in %s", key_file)
             else:
                 raise Exception(f"Downloading key ({key_url}) failed with status code {response.status_code}!")
 
@@ -1398,33 +1419,33 @@ def main(argv=sys.argv):
             keysig_url = args.ima_sign_verification_key_sig_urls[i]
 
             if len(args.ima_sign_verification_key_sig_url_keys) == 0:
-                raise UserError("A gpg key is missing for key signature URL '%s'" % keysig_url)
+                raise UserError(f"A gpg key is missing for key signature URL '{keysig_url}'")
 
-            logger.info("Downloading key signature from %s" % keysig_url)
+            logger.info("Downloading key signature from %s", keysig_url)
             response = requests.get(keysig_url, allow_redirects=False)
             if response.status_code == 200:
                 keysig_file = write_to_namedtempfile(response.content, delete_tmp_files)
-                logger.debug("Key signature temporarily saved in %s" % keysig_file)
+                logger.debug("Key signature temporarily saved in %s", keysig_file)
             else:
                 raise Exception(f"Downloading key signature ({key_url}) failed with status code {response.status_code}!")
 
             gpg_key_file = args.ima_sign_verification_key_sig_url_keys[i]
-            gpg.gpg_verify_filesignature(gpg_key_file, key_file, keysig_file, "IMA file signing key")
-            logger.info("Signature verification on %s was successful" % key_url)
+            signing.verify_signature_from_file(gpg_key_file, key_file, keysig_file, "IMA file signing key")
+            logger.info("Signature verification on %s was successful", key_url)
 
     if args.command == 'add':
         mytenant.init_add(vars(args))
         mytenant.preloop()
-        mytenant.do_cv()
         mytenant.do_quote()
+        mytenant.do_cv()
         if args.verify:
             mytenant.do_verify()
     elif args.command == 'update':
         mytenant.init_add(vars(args))
         mytenant.do_cvdelete(args.verifier_check)
         mytenant.preloop()
-        mytenant.do_cv()
         mytenant.do_quote()
+        mytenant.do_cv()
         if args.verify:
             mytenant.do_verify()
     elif args.command == 'delete':
@@ -1452,4 +1473,4 @@ def main(argv=sys.argv):
     elif args.command == 'deleteallowlist':
         mytenant.do_delete_allowlist(args.allowlist_name)
     else:
-        raise UserError("Invalid command specified: %s" % (args.command))
+        raise UserError(f"Invalid command specified: {args.command}")

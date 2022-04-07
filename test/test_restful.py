@@ -58,6 +58,8 @@ from keylime import api_version
 from keylime.common import algorithms
 
 
+#pylint: disable=no-self-use
+
 # Coverage support
 if "COVERAGE_FILE" in os.environ:
     FORK_ARGS = ["coverage", "run", "--parallel-mode"]
@@ -133,10 +135,10 @@ def setUpModule():
         env = os.environ.copy()
         env['PATH'] = env['PATH'] + ":/usr/local/bin"
         # Run init_tpm_server and tpm_serverd (start fresh)
-        its = subprocess.Popen(["init_tpm_server"], shell=False, env=env)
-        its.wait()
-        tsd = subprocess.Popen(["tpm_serverd"], shell=False, env=env)
-        tsd.wait()
+        with subprocess.Popen(["init_tpm_server"], shell=False, env=env) as its:
+            its.wait()
+        with subprocess.Popen(["tpm_serverd"], shell=False, env=env) as tsd:
+            tsd.wait()
     except Exception:
         print("WARNING: Restarting TPM emulator failed!")
     # Note: the following is required as abrmd is failing to reconnect to MSSIM, once
@@ -188,7 +190,7 @@ def setUpModule():
     tenant_templ.agent_base_url = f'{tenant_templ.cloudagent_ip}:{tenant_templ.cloudagent_port}'
     tenant_templ.supported_version = "2.0"
     # Set up TLS
-    tenant_templ.cert, tenant_templ.agent_cert = tenant_templ.get_tls_context()
+    tenant_templ.cert, tenant_templ.agent_cert, _ = tenant_templ.get_tls_context()
 
 
 # Destroy everything on teardown
@@ -201,9 +203,9 @@ def tearDownModule():
 
 def launch_cloudverifier():
     """Start up the cloud verifier"""
-    global cv_process, script_env, FORK_ARGS
+    global cv_process
     if cv_process is None:
-        cv_process = subprocess.Popen("keylime_verifier",
+        cv_process = subprocess.Popen("keylime_verifier",  # pylint: disable=subprocess-popen-preexec-fn,consider-using-with
                                       shell=False,
                                       preexec_fn=os.setsid,
                                       stdout=subprocess.PIPE,
@@ -228,9 +230,9 @@ def launch_cloudverifier():
 
 def launch_registrar():
     """Start up the registrar"""
-    global reg_process, script_env, FORK_ARGS
+    global reg_process
     if reg_process is None:
-        reg_process = subprocess.Popen("keylime_registrar",
+        reg_process = subprocess.Popen("keylime_registrar",  # pylint: disable=subprocess-popen-preexec-fn,consider-using-with
                                        shell=False,
                                        preexec_fn=os.setsid,
                                        stdout=subprocess.PIPE,
@@ -255,7 +257,7 @@ def launch_registrar():
 
 def launch_cloudagent(agent="python"):
     """Start up the cloud agent"""
-    global agent_process, script_env, FORK_ARGS
+    global agent_process
     if agent == "python":
         agent_path = "keylime_agent"
     elif agent == "rust":
@@ -263,7 +265,7 @@ def launch_cloudagent(agent="python"):
     else:
         agent_path = "echo"
     if agent_process is None:
-        agent_process = subprocess.Popen(agent_path,
+        agent_process = subprocess.Popen(agent_path,  # pylint: disable=subprocess-popen-preexec-fn,consider-using-with
                                          shell=False,
                                          preexec_fn=os.setsid,
                                          stdout=subprocess.PIPE,
@@ -444,7 +446,6 @@ class TestRestful(unittest.TestCase):
     @unittest.skipIf(vtpm, "Registrar's PUT /agents/{UUID}/activate only for non-vTPMs!")
     def test_011_reg_agent_activate_put(self):
         """Test registrar's PUT /agents/{UUID}/activate Interface"""
-        global keyblob
 
         self.assertIsNotNone(keyblob, "Required value not set.  Previous step may have failed?")
 
@@ -598,7 +599,6 @@ class TestRestful(unittest.TestCase):
         """Test agent's POST /keys/vkey Interface"""
         # CV should do this (during CV POST/PUT test)
         # Running this test might hide problems with the CV sending the V key
-        global public_key
 
         self.assertIsNotNone(self.V, "Required value not set.  Previous step may have failed?")
         self.assertIsNotNone(public_key, "Required value not set.  Previous step may have failed?")
@@ -623,7 +623,6 @@ class TestRestful(unittest.TestCase):
 
     def test_024_agent_keys_ukey_post(self):
         """Test agents's POST /keys/ukey Interface"""
-        global public_key
 
         self.assertIsNotNone(public_key, "Required value not set.  Previous step may have failed?")
         self.assertIsNotNone(self.U, "Required value not set.  Previous step may have failed?")

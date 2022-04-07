@@ -12,19 +12,21 @@ EXIT_SUCESS = 0
 
 
 def _execute(cmd, env=None, **kwargs):
-    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, **kwargs)
-    out, err = proc.communicate()
-    code = proc.returncode
-    return out, err, code
+    with subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, **kwargs) as proc:
+        out, err = proc.communicate()
+        return out, err, proc.returncode
 
 
 def run(cmd, expectedcode=EXIT_SUCESS, raiseOnError=True, outputpaths=None,
-        env=os.environ, **kwargs):
+        env=None, **kwargs):
     """Execute external command.
 
     :param cmd: a sequence of command arguments
     """
+    if env is None:
+        env = os.environ
+
     t0 = time.time()
     retout, reterr, code = _execute(cmd, env=env, **kwargs)
 
@@ -37,8 +39,8 @@ def run(cmd, expectedcode=EXIT_SUCESS, raiseOnError=True, outputpaths=None,
 
     # Don't bother continuing if call failed and we're raising on error
     if code != expectedcode and raiseOnError:
-        raise Exception("Command: %s returned %d, expected %d, output %s, stderr %s" %
-                        (cmd, code, expectedcode, retout_list, reterr_list))
+        raise Exception(f"Command: {cmd} returned {code}, expected {expectedcode}, "
+                        f"output {reterr_list}, stderr {reterr_list}")
 
     # Prepare to return their file contents (if requested)
     fileouts = {}

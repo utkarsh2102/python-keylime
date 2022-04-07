@@ -70,9 +70,9 @@ def run_migrations_offline():
 
     for name in re.split(r",\s*", db_names):
 
-        logger.info("Migrating database %s" % name)
-        file_ = "%s.sql" % name
-        logger.info("Writing output to %s" % file_)
+        logger.info("Migrating database %s", name)
+        file_ = f"{name}.sql"
+        logger.info("Writing output to %s", file_)
 
         with open(file_, "w", encoding="utf-8") as buffer:
             engine = DBEngineManager().make_engine(name)
@@ -116,13 +116,13 @@ def run_migrations_online():
 
     try:
         for name, rec in engines.items():
-            logger.info("Migrating database %s" % name)
+            logger.info("Migrating database %s", name)
             context.configure(
                 connection=rec["connection"],
-                upgrade_token="%s_upgrades" % name,
-                downgrade_token="%s_downgrades" % name,
+                upgrade_token=f"{name}_upgrades",
+                downgrade_token=f"{name}_downgrades",
                 target_metadata=target_metadata.get(name),
-                version_table="alembic_version_" + name,
+                version_table=f"alembic_version_{name}",
             )
             context.run_migrations(engine_name=name)
 

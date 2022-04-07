@@ -83,7 +83,10 @@ case "$ID" in
 
     fedora)
         PACKAGE_MGR="dnf"
+    ;;
 
+    sles | opensuse-leap | opensuse-tumbleweed )
+        PACKAGE_MGR="zypper"
     ;;
 
     *)
@@ -119,10 +122,9 @@ if [ ! -f "/etc/keylime.conf" ]; then
         cp -n $KEYLIME_DIR/keylime.conf /etc/keylime.conf
         echo -e "Setting require_ek_cert to False"
         sed -i 's/require_ek_cert = True/require_ek_cert = False/g' /etc/keylime.conf
-        if [ "$CA_IMP" == "openssl" ]; then
-            echo -e "Setting CA Implementation to OpenSSL"
-            sed -i 's/ca_implementation = cfssl/ca_implementation = openssl/g' /etc/keylime.conf
-        elif [ "$CA_IMP" == "cfssl" ]; then
+        if [ "$CA_IMP" == "cfssl" ]; then
+            echo -e "Setting CA Implementation to CFSSL"
+            sed -i 's/ca_implementation = openssl/ca_implementation = cfssl/g' /etc/keylime.conf
             $PACKAGE_MGR install -y golang
         fi
     fi
@@ -139,6 +141,10 @@ elif [ $PACKAGE_MGR = "yum" ]; then
     PYTHON_DEPS="python36-pip python36-dbus"
 # Ubuntu / Debian
 elif [ $PACKAGE_MGR = "apt-get" ]; then
+    PYTHON_PREIN="python3"
+    PYTHON_DEPS="python3-pip python3-dbus"
+# SUSE
+elif [ $PACKAGE_MGR = "zypper" ]; then
     PYTHON_PREIN="python3"
     PYTHON_DEPS="python3-pip python3-dbus"
 else

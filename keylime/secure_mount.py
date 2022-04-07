@@ -4,6 +4,7 @@ Copyright 2017 Massachusetts Institute of Technology.
 '''
 
 import os
+import shutil
 
 from keylime import keylime_logging
 from keylime import cmd_exec
@@ -19,52 +20,60 @@ _MOUNTED = []
 def check_mounted(secdir):
     """Inspect mountinfo to detect if a directory is mounted."""
     secdir_escaped = secdir.replace(" ", r"\040")
-    for line in open("/proc/self/mountinfo", "r", encoding="utf-8"):
-        # /proc/[pid]/mountinfo have 10+ elements separated with
-        # spaces (check proc (5) for a complete description)
-        #
-        # At position 7 there are some optional fields, so we need
-        # first to determine the separator mark, and validate the
-        # final total number of fields.
-        elements = line.split()
-        try:
-            separator = elements.index("-")
-        except ValueError:
-            msg = "Separator filed not found. " \
-                "Information line cannot be parsed"
-            logger.error(msg)
-            # pylint: disable=raise-missing-from
-            raise Exception(msg)
+    with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
+        for line in f:
+            # /proc/[pid]/mountinfo have 10+ elements separated with
+            # spaces (check proc (5) for a complete description)
+            #
+            # At position 7 there are some optional fields, so we need
+            # first to determine the separator mark, and validate the
+            # final total number of fields.
+            elements = line.split()
+            try:
+                separator = elements.index("-")
+            except ValueError:
+                msg = "Separator field not found. " \
+                    "Information line cannot be parsed"
+                logger.error(msg)
+                # pylint: disable=raise-missing-from
+                raise Exception(msg)
 
-        if len(elements) < 10 or len(elements) - separator < 4:
-            msg = "Mount information line cannot be parsed"
-            logger.error(msg)
-            raise Exception(msg)
-
-        mount_point = elements[4]
-        filesystem_type = elements[separator + 1]
-        if mount_point == secdir_escaped:
-            if filesystem_type != "tmpfs":
-                msg = f"Secure storage location {secdir} already mounted " \
-                    f"on wrong file system type: {filesystem_type}. " \
-                    "Unmount to continue."
+            if len(elements) < 10 or len(elements) - separator < 4:
+                msg = "Mount information line cannot be parsed"
                 logger.error(msg)
                 raise Exception(msg)
 
-            logger.debug(
-                "Secure storage location %s already mounted on tmpfs", secdir
-            )
-            return True
+            mount_point = elements[4]
+            filesystem_type = elements[separator + 1]
+            if mount_point == secdir_escaped:
+                if filesystem_type != "tmpfs":
+                    msg = f"Secure storage location {secdir} already mounted " \
+                        f"on wrong file system type: {filesystem_type}. " \
+                        "Unmount to continue."
+                    logger.error(msg)
+                    raise Exception(msg)
+
+                logger.debug(
+                    "Secure storage location %s already mounted on tmpfs", secdir
+                )
+                return True
 
     logger.debug("Secure storage location %s not mounted", secdir)
     return False
 
 
-def mount():
+def get_secdir():
     secdir = os.path.join(config.WORK_DIR, "secure")
 
     if not config.MOUNT_SECURE:
         secdir = os.path.join(config.WORK_DIR, "tmpfs-dev")
+
+    return secdir
+
+def mount():
+    secdir = get_secdir()
+
+    if not config.MOUNT_SECURE:
         if not os.path.isdir(secdir):
             os.makedirs(secdir)
         return secdir
@@ -74,8 +83,8 @@ def mount():
         if not os.path.exists(secdir):
             os.makedirs(secdir, 0o700)
         size = config.get('cloud_agent', 'secure_size')
-        logger.info("mounting secure storage location %s on tmpfs" % secdir)
-        cmd = ('mount', '-t', 'tmpfs', '-o', 'size=%s,mode=0700' % size,
+        logger.info("mounting secure storage location %s on tmpfs", secdir)
+        cmd = ('mount', '-t', 'tmpfs', '-o', f'size={size},mode=0700',
                'tmpfs', secdir)
         cmd_exec.run(cmd)
         _MOUNTED.append(secdir)
@@ -85,6 +94,15 @@ def mount():
 
 def umount():
     """Umount all the devices mounted by Keylime."""
+
+    # Make sure we leave tmpfs dir empty even if we did not mount it or
+    # if we cannot unmount it. Ignore errors while deleting. The deletion
+    # of the 'secure' directory will result in an error since it's a mount point.
+    # Also, with config.MOUNT_SECURE being False we remove the directory
+    secdir = get_secdir()
+    if not config.MOUNT_SECURE or check_mounted(secdir):
+        shutil.rmtree(secdir, ignore_errors=True)
+
     while _MOUNTED:
         directory = _MOUNTED.pop()
         logger.info("Unmounting %s", directory)
