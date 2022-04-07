@@ -1,0 +1,21 @@
+Description: Drop agent privileges to keylime:tss
+ Keylime supports running the agent as a different user now,
+ but this feature is not yet the default. This patch changes
+ that by setting run_as = keylime:tss in the keylime.conf
+Author: Thore Sommer <debian@thson.de>
+Origin: vendor
+Forwarded: not-needed
+Last-Update: 2022-04-07
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/keylime.conf
++++ b/keylime.conf
+@@ -174,7 +174,7 @@
+ # chown keylime /var/lib/keylime/cv_ca
+ # chown keylime /var/lib/keylime/cv_ca/cacert.crt
+ #
+-run_as =
++run_as = keylime:tss
+ 
+ #=============================================================================
+ [cloud_verifier]
