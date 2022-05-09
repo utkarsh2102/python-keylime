@@ -9,6 +9,8 @@ import sys
 import functools
 import asyncio
 import os
+from multiprocessing import Process
+
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm.exc import NoResultFound
@@ -101,6 +103,11 @@ def _from_db_obj(agent_db_obj):
     agent_dict = {}
     for field in fields:
         agent_dict[field] = getattr(agent_db_obj, field, None)
+
+    # add default fields that are ephemeral
+    for key,val in exclude_db.items():
+        agent_dict[key] = val
+
     return agent_dict
 
 
@@ -122,7 +129,7 @@ def store_attestation_state(agentAttestState):
             ima_pcrs_dict = agentAttestState.get_ima_pcrs()
             update_agent.ima_pcrs = list(ima_pcrs_dict.keys())
             for pcr_num, value in ima_pcrs_dict.items():
-                setattr(update_agent, 'pcr%d' % pcr_num, value)
+                setattr(update_agent, f'pcr{pcr_num}', value)
             update_agent.learned_ima_keyrings = agentAttestState.get_ima_keyrings().to_json()
             try:
                 session.add(update_agent)
@@ -285,10 +292,10 @@ class AgentsHandler(BaseHandler):
                 web_util.echo_json_response(self, 404, "agent id not found")
         else:
             json_response = None
-            if "bulk" in rest_params.keys():
+            if "bulk" in rest_params:
                 agent_list = None
 
-                if ("verifier" in rest_params.keys()) and (rest_params["verifier"] != ''):
+                if ("verifier" in rest_params) and (rest_params["verifier"] != ''):
                     agent_list = session.query(VerfierMain).filter_by(verifier_id=rest_params["verifier"]).all()
                 else:
                     agent_list = session.query(VerfierMain).all()
@@ -299,7 +306,7 @@ class AgentsHandler(BaseHandler):
 
                 web_util.echo_json_response(self, 200, "Success", json_response)
             else:
-                if ("verifier" in rest_params.keys()) and (rest_params["verifier"] != ''):
+                if ("verifier" in rest_params) and (rest_params["verifier"] != ''):
                     json_response = session.query(VerfierMain.agent_id).filter_by(
                         verifier_id=rest_params["verifier"]).all()
                 else:
@@ -463,7 +470,7 @@ class AgentsHandler(BaseHandler):
                     if registrar_data is None:
                         web_util.echo_json_response(self, 400,
                                                     f"Data for agent {agent_id} could not be found in registrar!")
-                        logger.warning(f"Data for agent {agent_id} could not be found in registrar!")
+                        logger.warning("Data for agent %s could not be found in registrar!", agent_id)
                         return
 
                     agent_data['mtls_cert'] = registrar_data.get('mtls_cert', None)
@@ -491,7 +498,7 @@ class AgentsHandler(BaseHandler):
 
                     if new_agent_count > 0:
                         web_util.echo_json_response(
-                            self, 409, "Agent of uuid %s already exists" % (agent_id))
+                            self, 409, f"Agent of uuid {agent_id} already exists")
                         logger.warning("Agent of uuid %s already exists", agent_id)
                     else:
                         try:
@@ -502,16 +509,16 @@ class AgentsHandler(BaseHandler):
                             logger.error('SQLAlchemy Error: %s', e)
                             raise e
 
-                        for key in list(exclude_db.keys()):
-                            agent_data[key] = exclude_db[key]
+                        # add default fields that are ephemeral
+                        for key,val in exclude_db.items():
+                            agent_data[key] = val
 
                         # Prepare SSLContext for mTLS connections
-                        # TODO: drop special handling after initial upgrade
+                        agent_mtls_cert_enabled = config.getboolean('cloud_verifier', 'agent_mtls_cert_enabled', fallback=False)
                         mtls_cert = registrar_data.get('mtls_cert', None)
                         agent_data['ssl_context'] = None
-                        if mtls_cert:
-                            agent_data['ssl_context'] = web_util.generate_agent_mtls_context(mtls_cert,
-                                                                                             self.mtls_options)
+                        if agent_mtls_cert_enabled and mtls_cert:
+                            agent_data['ssl_context'] = web_util.generate_agent_mtls_context(mtls_cert, self.mtls_options)
 
                         if agent_data['ssl_context'] is None:
                             logger.warning('Connecting to agent without mTLS: %s', agent_id)
@@ -524,7 +531,7 @@ class AgentsHandler(BaseHandler):
                 web_util.echo_json_response(self, 400, "uri not supported")
                 logger.warning("POST returning 400 response. uri not supported")
         except Exception as e:
-            web_util.echo_json_response(self, 400, "Exception error: %s" % e)
+            web_util.echo_json_response(self, 400, f"Exception error: {str(e)}")
             logger.warning("POST returning 400 response. Exception error: %s", e)
             logger.exception(e)
 
@@ -604,7 +611,7 @@ class AgentsHandler(BaseHandler):
                 logger.warning("PUT returning 400 response. uri not supported")
 
         except Exception as e:
-            web_util.echo_json_response(self, 400, "Exception error: %s" % e)
+            web_util.echo_json_response(self, 400, f"Exception error: {str(e)}")
             logger.warning("PUT returning 400 response. Exception error: %s", e)
             logger.exception(e)
 
@@ -636,7 +643,7 @@ class AllowlistHandler(BaseHandler):
         if allowlist_name is None:
             web_util.echo_json_response(self, 400, "Invalid URL")
             logger.warning(
-                'GET returning 400 response: ' + self.request.path)
+                'GET returning 400 response: %s', self.request.path)
             return
 
         session = get_session()
@@ -644,10 +651,10 @@ class AllowlistHandler(BaseHandler):
             allowlist = session.query(VerifierAllowlist).filter_by(
                 name=allowlist_name).one()
         except NoResultFound:
-            web_util.echo_json_response(self, 404, "Allowlist %s not found" % allowlist_name)
+            web_util.echo_json_response(self, 404, f"Allowlist {allowlist_name} not found")
             return
         except SQLAlchemyError as e:
-            logger.error(f'SQLAlchemy Error: {e}')
+            logger.error('SQLAlchemy Error: %s', e)
             web_util.echo_json_response(self, 500, "Failed to get allowlist")
             raise
 
@@ -675,7 +682,7 @@ class AllowlistHandler(BaseHandler):
         if allowlist_name is None:
             web_util.echo_json_response(self, 400, "Invalid URL")
             logger.warning(
-                'DELETE returning 400 response: ' + self.request.path)
+                'DELETE returning 400 response: %s', self.request.path)
             return
 
         session = get_session()
@@ -683,10 +690,10 @@ class AllowlistHandler(BaseHandler):
             session.query(VerifierAllowlist).filter_by(
                 name=allowlist_name).one()
         except NoResultFound:
-            web_util.echo_json_response(self, 404, "Allowlist %s not found" % allowlist_name)
+            web_util.echo_json_response(self, 404, f"Allowlist {allowlist_name} not found")
             return
         except SQLAlchemyError as e:
-            logger.error(f'SQLAlchemy Error: {e}')
+            logger.error('SQLAlchemy Error: %s', e)
             web_util.echo_json_response(self, 500, "Failed to get allowlist")
             raise
 
@@ -695,7 +702,7 @@ class AllowlistHandler(BaseHandler):
                 name=allowlist_name).delete()
             session.commit()
         except SQLAlchemyError as e:
-            logger.error(f'SQLAlchemy Error: {e}')
+            logger.error('SQLAlchemy Error: %s', e)
             web_util.echo_json_response(self, 500, "Failed to get allowlist")
             raise
 
@@ -705,7 +712,7 @@ class AllowlistHandler(BaseHandler):
         self.set_header('Content-Type', 'application/json')
         self.finish()
         logger.info(
-            'DELETE returning 204 response for allowlist: ' + allowlist_name)
+            'DELETE returning 204 response for allowlist: %s', allowlist_name)
 
     def post(self):
         """Create an allowlist
@@ -756,12 +763,12 @@ class AllowlistHandler(BaseHandler):
                 VerifierAllowlist).filter_by(name=allowlist_name).count()
             if al_count > 0:
                 web_util.echo_json_response(
-                    self, 409, "Allowlist with name %s already exists" % allowlist_name)
+                    self, 409, f"Allowlist with name {allowlist_name} already exists")
                 logger.warning(
-                    "Allowlist with name %s already exists" % allowlist_name)
+                    "Allowlist with name %s already exists", allowlist_name)
                 return
         except SQLAlchemyError as e:
-            logger.error(f'SQLAlchemy Error: {e}')
+            logger.error('SQLAlchemy Error: %s', e)
             raise
 
         try:
@@ -769,7 +776,7 @@ class AllowlistHandler(BaseHandler):
             session.add(VerifierAllowlist(**allowlist))
             session.commit()
         except SQLAlchemyError as e:
-            logger.error(f'SQLAlchemy Error: {e}')
+            logger.error('SQLAlchemy Error: %s', e)
             raise
 
         web_util.echo_json_response(self, 201)
@@ -796,14 +803,15 @@ async def invoke_get_quote(agent, need_pubkey):
     # TODO: remove special handling after initial upgrade
     if agent['ssl_context']:
         res = tornado_requests.request("GET",
-                                       "https://%s:%d/v%s/quotes/integrity?nonce=%s&mask=%s&vmask=%s&partial=%s&ima_ml_entry=%d" %
-                                       (agent['ip'], agent['port'], agent['supported_version'], params["nonce"], params["mask"], params['vmask'], partial_req, params['ima_ml_entry']),
+                                       f"https://{agent['ip']}:{agent['port']}/v{agent['supported_version']}/quotes/integrity"
+                                       f"?nonce={params['nonce']}&mask={params['mask']}&vmask={params['vmask']}"
+                                       f"&partial={partial_req}&ima_ml_entry={params['ima_ml_entry']}",
                                        context=agent['ssl_context'])
     else:
         res = tornado_requests.request("GET",
-                                       "http://%s:%d/v%s/quotes/integrity?nonce=%s&mask=%s&vmask=%s&partial=%s&ima_ml_entry=%d" %
-                                       (agent['ip'], agent['port'], agent['supported_version'], params["nonce"], params["mask"],
-                                        params['vmask'], partial_req, params['ima_ml_entry']))
+                                       f"http://{agent['ip']}:{agent['port']}/v{agent['supported_version']}/quotes/integrity"
+                                       f"?nonce={params['nonce']}&mask={params['mask']}&vmask={params['vmask']}"
+                                       f"&partial={partial_req}&ima_ml_entry={params['ima_ml_entry']}")
     response = await res
 
     if response.status_code != 200:
@@ -854,11 +862,11 @@ async def invoke_provide_v(agent):
     # TODO: remove special handling after initial upgrade
     if agent['ssl_context']:
         res = tornado_requests.request(
-            "POST", "https://%s:%d/v%s/keys/vkey" % (agent['ip'], agent['port'], agent['supported_version']),
+            "POST", f"https://{agent['ip']}:{agent['port']}/v{agent['supported_version']}/keys/vkey",
             data=v_json_message, context=agent['ssl_context'])
     else:
         res = tornado_requests.request(
-            "POST", "http://%s:%d/v%s/keys/vkey" % (agent['ip'], agent['port'], agent['supported_version']),
+            "POST", f"http://{agent['ip']}:{agent['port']}/v{agent['supported_version']}/keys/vkey",
             data=v_json_message)
 
     response = await res
@@ -1050,17 +1058,11 @@ async def activate_agents(verifier_id, verifier_ip, verifier_port, mtls_options)
             if agent.boottime:
                 ima_pcrs_dict = {}
                 for pcr_num in agent.ima_pcrs:
-                    ima_pcrs_dict[pcr_num] = getattr(agent, 'pcr%d' % pcr_num)
+                    ima_pcrs_dict[pcr_num] = getattr(agent, f'pcr{pcr_num}')
                 aas.add(agent.agent_id, agent.boottime, ima_pcrs_dict, agent.next_ima_ml_entry, agent.learned_ima_keyrings)
         session.commit()
     except SQLAlchemyError as e:
         logger.error('SQLAlchemy Error: %s', e)
-
-def start_tornado(tornado_server, port):
-    tornado_server.listen(port)
-    print("Starting Torando on port " + str(port))
-    tornado.ioloop.IOLoop.instance().start()
-    print("Tornado finished")
 
 
 def main():
@@ -1121,27 +1123,58 @@ def main():
     sockets = tornado.netutil.bind_sockets(
         int(cloudverifier_port), address=cloudverifier_host)
 
-    tornado.process.fork_processes(config.getint(
-        'cloud_verifier', 'multiprocessing_pool_num_workers'))
+    def server_process(task_id):
+        logger.info("Starting server of process %s", task_id)
+        engine.dispose()
+        server = tornado.httpserver.HTTPServer(app, ssl_options=context, max_buffer_size=max_upload_size)
+        server.add_sockets(sockets)
 
-    server = tornado.httpserver.HTTPServer(app, ssl_options=context, max_buffer_size=max_upload_size)
-    server.add_sockets(sockets)
+        def server_sig_handler(*_):
+            logger.info("Shutting down server %s..", task_id)
+            # Stop server to not accept new incoming connections
+            server.stop()
 
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+            # Wait for all connections to be closed and then stop ioloop
+            async def stop():
+                await server.close_all_connections()
+                tornado.ioloop.IOLoop.current().stop()
+            asyncio.ensure_future(stop())
 
-    try:
+        # Attach signal handler to ioloop.
+        # Do not use signal.signal(..) for that because it does not work!
+        loop = asyncio.get_event_loop()
+        loop.add_signal_handler(signal.SIGINT, server_sig_handler)
+        loop.add_signal_handler(signal.SIGTERM, server_sig_handler)
+
         server.start()
-        if tornado.process.task_id() == 0:
-            # Start the revocation notifier only on one process
-            if config.getboolean('cloud_verifier', 'revocation_notifier'):
-                logger.info("Starting service for revocation notifications on port %s",
-                            config.getint('cloud_verifier', 'revocation_notifier_port'))
-                revocation_notifier.start_broker()
-            # Auto activate agents
+        if task_id == 0:
+            # Reactivate agents
             asyncio.ensure_future(activate_agents(cloudverifier_id, cloudverifier_host, cloudverifier_port, mtls_options))
-
         tornado.ioloop.IOLoop.current().start()
-    except (KeyboardInterrupt, SystemExit):
-        tornado.ioloop.IOLoop.current().stop()
-        if tornado.process.task_id() == 0 and config.getboolean('cloud_verifier', 'revocation_notifier'):
+        logger.debug("Server %s stopped.", task_id)
+        sys.exit(0)
+
+    processes = []
+
+    def sig_handler(*_):
+        if config.getboolean('cloud_verifier', 'revocation_notifier'):
             revocation_notifier.stop_broker()
+        for p in processes:
+            p.join()
+        sys.exit(0)
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+    if config.getboolean('cloud_verifier', 'revocation_notifier'):
+        logger.info("Starting service for revocation notifications on port %s",
+                    config.getint('cloud_verifier', 'revocation_notifier_port'))
+        revocation_notifier.start_broker()
+
+    num_workers = config.getint(
+        'cloud_verifier', 'multiprocessing_pool_num_workers')
+    if num_workers <= 0:
+        num_workers = tornado.process.cpu_count()
+    for task_id in range(0, num_workers):
+        process = Process(target=server_process, args=(task_id,))
+        process.start()
+        processes.append(process)

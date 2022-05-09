@@ -43,6 +43,7 @@ from keylime import json
 from keylime import revocation_notifier
 from keylime import registrar_client
 from keylime import secure_mount
+from keylime import user_utils
 from keylime import web_util
 from keylime import api_version as keylime_api_version
 from keylime.common import algorithms, validators
@@ -181,7 +182,7 @@ class Handler(BaseHTTPRequestHandler):
                 ima_ml_entry = int(ima_ml_entry)
                 if ima_ml_entry > self.server.next_ima_ml_entry:
                     ima_ml_entry = 0
-                ml, nth_entry, num_entries = ima.read_measurement_list(config.IMA_ML, ima_ml_entry)
+                ml, nth_entry, num_entries = ima.read_measurement_list(self.server.ima_log_file, ima_ml_entry)
                 if num_entries > 0:
                     response['ima_measurement_list'] = ml
                     response['ima_measurement_list_entry'] = nth_entry
@@ -192,12 +193,10 @@ class Handler(BaseHTTPRequestHandler):
             # generally speaking, retrieving the 15Kbytes of a boot log does not seem significant compared to the
             # potential Mbytes of an IMA measurement list.
             if TPM_Utilities.check_mask(imaMask, config.MEASUREDBOOT_PCRS[0]):
-                if not os.path.exists(config.MEASUREDBOOT_ML):
+                if not self.server.tpm_log_file_data:
                     logger.warning("TPM2 event log not available: %s", config.MEASUREDBOOT_ML)
                 else:
-                    with open(config.MEASUREDBOOT_ML, 'rb') as f:
-                        el = base64.b64encode(f.read())
-                    response['mb_measurement_list'] = el
+                    response['mb_measurement_list'] = self.server.tpm_log_file_data
 
             web_util.echo_json_response(self, 200, "Success", response)
             logger.info('GET %s quote returning 200 response.', rest_params["quotes"])
@@ -276,13 +275,12 @@ class Handler(BaseHTTPRequestHandler):
         secdir = secure_mount.mount()  # confirm that storage is still securely mounted
 
         # clean out the secure dir of any previous info before we extract files
-        if os.path.isdir("%s/unzipped" % secdir):
-            shutil.rmtree("%s/unzipped" % secdir)
+        if os.path.isdir(os.path.join(secdir, "unzipped")):
+            shutil.rmtree(os.path.join(secdir, "unzipped"))
 
         # write out key file
-        f = open(secdir + "/" + self.server.enc_keyname, 'w', encoding="utf-8")
-        f.write(base64.b64encode(self.server.K).decode())
-        f.close()
+        with open(os.path.join(secdir, self.server.enc_keyname), 'w', encoding="utf-8") as f:
+            f.write(base64.b64encode(self.server.K).decode())
 
         # stow the U value for later
         tpm_instance.write_key_nvram(self.server.final_U)
@@ -298,10 +296,15 @@ class Handler(BaseHTTPRequestHandler):
         dec_payload = None
         enc_payload = None
         if self.server.payload is not None:
-            dec_payload = crypto.decrypt(
-                self.server.payload, bytes(self.server.K))
+            if (not self.server.mtls_cert_enabled and
+                not config.getboolean('cloud_agent', 'enable_insecure_payload', fallback=False)):
+                logger.warning('agent mTLS is disabled, and unless "enable_insecure_payload" is set to "True", payloads cannot be deployed')
+                enc_payload = None
+            else:
+                dec_payload = crypto.decrypt(
+                    self.server.payload, bytes(self.server.K))
+                enc_payload = self.server.payload
 
-            enc_payload = self.server.payload
         elif os.path.exists(enc_path):
             # if no payload provided, try to decrypt one from a previous run stored in encrypted_payload
             with open(enc_path, 'rb') as f:
@@ -328,7 +331,7 @@ class Handler(BaseHTTPRequestHandler):
             if config.getboolean('cloud_agent', 'extract_payload_zip') and zipfile.is_zipfile(zfio):
                 logger.info("Decrypting and unzipping payload to %s/unzipped", secdir)
                 with zipfile.ZipFile(zfio, 'r')as f:
-                    f.extractall('%s/unzipped' % secdir)
+                    f.extractall(os.path.join(secdir, "unzipped"))
 
                 # run an included script if one has been provided
                 initscript = config.get('cloud_agent', 'payload_script')
@@ -336,12 +339,13 @@ class Handler(BaseHTTPRequestHandler):
                     def initthread():
                         env = os.environ.copy()
                         env['AGENT_UUID'] = self.server.agent_uuid
-                        proc = subprocess.Popen(["/bin/bash", initscript], env=env, shell=False, cwd='%s/unzipped' % secdir,
-                                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-                        for line in iter(proc.stdout.readline, b''):
-                            logger.debug("init-output: %s", line.strip())
-                        # should be a no-op as poll already told us it's done
-                        proc.wait()
+                        with subprocess.Popen(["/bin/bash", initscript], env=env, shell=False,
+                                                cwd=os.path.join(secdir, "unzipped"),
+                                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
+                            for line in iter(proc.stdout.readline, b''):
+                                logger.debug("init-output: %s", line.strip())
+                            # should be a no-op as poll already told us it's done
+                            proc.wait()
 
                     if not os.path.exists(
                             os.path.join(secdir, "unzipped", initscript)):
@@ -387,6 +391,7 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
     rsapublickey_exportable = None
     mtls_cert_path = None
     rsakey_path = None
+    mtls_cert_enabled = False
     mtls_cert = None
     done = threading.Event()
     auth_tag = None
@@ -398,7 +403,7 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
     next_ima_ml_entry = 0 # The next IMA log offset the verifier may ask for.
     boottime = int(psutil.boot_time())
 
-    def __init__(self, server_address, RequestHandlerClass, agent_uuid, contact_ip):
+    def __init__(self, server_address, RequestHandlerClass, agent_uuid, contact_ip, ima_log_file, tpm_log_file_data):
         """Constructor overridden to provide ability to pass configuration arguments to the server"""
         # Find the locations for the U/V transport and mTLS key and certificate.
         # They are either relative to secdir (/var/lib/keylime/secure) or absolute paths.
@@ -406,16 +411,13 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
         keyname = config.get('cloud_agent', 'rsa_keyname')
         if not os.path.isabs(keyname):
             keyname = os.path.join(secdir, keyname)
-        certname = config.get('cloud_agent', 'mtls_cert')
-        if not os.path.isabs(certname):
-            certname = os.path.join(secdir, certname)
 
         # read or generate the key depending on configuration
         if os.path.isfile(keyname):
             # read in private key
             logger.info("Using existing key in %s", keyname)
-            f = open(keyname, "rb")
-            rsa_key = crypto.rsa_import_privkey(f.read())
+            with open(keyname, "rb") as f:
+                rsa_key = crypto.rsa_import_privkey(f.read())
         else:
             logger.info("Key for U/V transport and mTLS certificate not found, generating a new one")
             rsa_key = crypto.rsa_generate(2048)
@@ -427,23 +429,34 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
         self.rsapublickey_exportable = crypto.rsa_export_pubkey(
             self.rsaprivatekey)
 
-        if os.path.isfile(certname):
-            logger.info("Using existing mTLS cert in %s", certname)
-            with open(certname, "rb") as f:
-                mtls_cert = x509.load_pem_x509_certificate(f.read(), backend=default_backend())
-        else:
-            logger.info("No mTLS certificate found, generating a new one")
-            agent_ips = [server_address[0]]
-            if contact_ip is not None:
-                agent_ips.append(contact_ip)
-            with open(certname, "wb") as f:
-                # By default generate a TLS certificate valid for 5 years
-                valid_util = datetime.datetime.utcnow() + datetime.timedelta(days=(360 * 5))
-                mtls_cert = crypto.generate_selfsigned_cert(agent_uuid, rsa_key, valid_util, agent_ips)
-                f.write(mtls_cert.public_bytes(serialization.Encoding.PEM))
+        self.mtls_cert_enabled = config.getboolean('cloud_agent', 'mtls_cert_enabled', fallback=False)
+        if self.mtls_cert_enabled:
+            certname = config.get('cloud_agent', 'mtls_cert')
 
-        self.mtls_cert_path = certname
-        self.mtls_cert = mtls_cert
+            if not os.path.isabs(certname):
+                certname = os.path.join(secdir, certname)
+
+            if os.path.isfile(certname):
+                logger.info("Using existing mTLS cert in %s", certname)
+                with open(certname, "rb") as f:
+                    mtls_cert = x509.load_pem_x509_certificate(f.read(), backend=default_backend())
+            else:
+                logger.info("No mTLS certificate found, generating a new one")
+                agent_ips = [server_address[0]]
+                if contact_ip is not None:
+                    agent_ips.append(contact_ip)
+                with open(certname, "wb") as f:
+                    # By default generate a TLS certificate valid for 5 years
+                    valid_util = datetime.datetime.utcnow() + datetime.timedelta(days=(360 * 5))
+                    mtls_cert = crypto.generate_selfsigned_cert(agent_uuid, rsa_key, valid_util, agent_ips)
+                    f.write(mtls_cert.public_bytes(serialization.Encoding.PEM))
+
+            self.mtls_cert_path = certname
+            self.mtls_cert = mtls_cert
+        else:
+            self.mtls_cert_path = None
+            self.mtls_cert = None
+            logger.info("WARNING: mTLS disabled, Tenant and Verifier will reach out to agent via HTTP")
 
         # attempt to get a U value from the TPM NVRAM
         nvram_u = tpm_instance.read_key_nvram()
@@ -454,6 +467,8 @@ class CloudAgentHTTPServer(ThreadingMixIn, HTTPServer):
             self, server_address, RequestHandlerClass)
         self.enc_keyname = config.get('cloud_agent', 'enc_keyname')
         self.agent_uuid = agent_uuid
+        self.ima_log_file = ima_log_file
+        self.tpm_log_file_data = tpm_log_file_data
 
     def add_U(self, u):
         """Threadsafe method for adding a U value received from the Tenant
@@ -571,7 +586,7 @@ def revocation_listener():
         actionlisttxt = config.get('cloud_agent', 'revocation_actions')
         if actionlisttxt.strip() != "":
             actionlist = actionlisttxt.split(',')
-            actionlist = ["revocation_actions.%s" % i for i in actionlist]
+            actionlist = [f"revocation_actions.{i}" % i for i in actionlist]
 
         # load actions from unzipped
         action_list_path = os.path.join(secdir, "unzipped/action_list")
@@ -586,7 +601,7 @@ def revocation_listener():
                     else:
                         actionlist.append(action)
 
-                uzpath = "%s/unzipped" % secdir
+                uzpath = os.path.join(secdir, "unzipped")
                 if uzpath not in sys.path:
                     sys.path.append(uzpath)
 
@@ -617,6 +632,15 @@ def main():
         if not os.access(ML, os.F_OK):
             logger.warning("Measurement list path %s not accessible by agent. Any attempt to instruct it to access this path - via \"keylime_tenant\" CLI - will result in agent process dying", ML)
 
+    ima_log_file = None
+    if os.path.exists(config.IMA_ML):
+        ima_log_file = open(config.IMA_ML, 'r', encoding="utf-8")  #pylint: disable=consider-using-with
+
+    tpm_log_file_data = None
+    if os.path.exists(config.MEASUREDBOOT_ML):
+        with open(config.MEASUREDBOOT_ML, 'rb') as tpm_log_file:
+            tpm_log_file_data = base64.b64encode(tpm_log_file.read())
+
     if config.get('cloud_agent', 'agent_uuid') == 'dmidecode':
         if os.getuid() != 0:
             raise RuntimeError('agent_uuid is configured to use dmidecode, '
@@ -626,6 +650,20 @@ def main():
         if ret['code'] != 0:
             raise RuntimeError('agent_uuid is configured to use dmidecode, '
                                'but it\'s is not found on the system.')
+
+    # initialize the tmpfs partition to store keys if it isn't already available
+    secdir = secure_mount.mount()
+
+    # Now that operations requiring root privileges are done, drop privileges
+    # if 'run_as' is available in the configuration.
+    if os.getuid() == 0:
+        run_as = config.get('cloud_agent', 'run_as', fallback='')
+        if run_as != '':
+            user_utils.chown(secdir, run_as)
+            user_utils.change_uidgid(run_as)
+            logger.info("Dropped privileges to %s", run_as)
+        else:
+            logger.warning("Cannot drop privileges since 'run_as' is empty or missing in keylime.conf agent section.")
 
     # Instanitate TPM class
 
@@ -641,9 +679,6 @@ def main():
     contact_port = os.getenv("KEYLIME_AGENT_CONTACT_PORT", None)
     if contact_port is None and config.has_option('cloud_agent', 'agent_contact_port'):
         contact_port = config.get('cloud_agent', 'agent_contact_port', fallback="invalid")
-
-    # initialize the tmpfs partition to store keys if it isn't already available
-    secure_mount.mount()
 
     # change dir to working dir
     fs_util.ch_dir(config.WORK_DIR)
@@ -690,7 +725,7 @@ def main():
         try:
             uuid.UUID(agent_uuid)
         except ValueError as e:
-            raise RuntimeError("The UUID returned from dmidecode is invalid: %s" % e)  # pylint: disable=raise-missing-from
+            raise RuntimeError(f"The UUID returned from dmidecode is invalid: {str(e)}")  # pylint: disable=raise-missing-from
     elif agent_uuid == 'hostname':
         agent_uuid = socket.getfqdn()
     elif agent_uuid == 'environment':
@@ -703,17 +738,6 @@ def main():
     if not validators.valid_agent_id(agent_uuid):
         raise RuntimeError("The agent ID set via agent uuid parameter use invalid characters")
 
-    if config.STUB_VTPM and config.TPM_CANNED_VALUES is not None:
-        # Use canned values for stubbing
-        jsonIn = config.TPM_CANNED_VALUES
-        if "add_vtpm_to_group" in jsonIn:
-            # The value we're looking for has been canned!
-            agent_uuid = jsonIn['add_vtpm_to_group']['retout']
-        else:
-            # Our command hasn't been canned!
-            raise Exception("Command %s not found in canned json!" %
-                            ("add_vtpm_to_group"))
-
     logger.info("Agent UUID: %s", agent_uuid)
 
     serveraddr = (config.get('cloud_agent', 'cloudagent_ip'),
@@ -723,13 +747,22 @@ def main():
     if keylime_ca == "default":
         keylime_ca = os.path.join(config.WORK_DIR, 'cv_ca', 'cacert.crt')
 
-    server = CloudAgentHTTPServer(serveraddr, Handler, agent_uuid, contact_ip)
-    context = web_util.generate_mtls_context(server.mtls_cert_path, server.rsakey_path, keylime_ca, logger=logger)
-    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server = CloudAgentHTTPServer(serveraddr, Handler, agent_uuid, contact_ip, ima_log_file, tpm_log_file_data)
+    if server.mtls_cert_enabled:
+        context = web_util.generate_mtls_context(server.mtls_cert_path, server.rsakey_path, keylime_ca, logger=logger)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+    else:
+        if not config.getboolean('cloud_agent', 'enable_insecure_payload', fallback=False) and config.get('cloud_agent', 'payload_script') != "":
+            raise RuntimeError('agent mTLS is disabled, while a tenant can instruct the agent to execute code on the node. '
+                               'In order to allow the running of the agent, "enable_insecure_payload" has to be set to "True"')
+
     serverthread = threading.Thread(target=server.serve_forever, daemon=True)
 
     # register it and get back a blob
-    mtls_cert = server.mtls_cert.public_bytes(serialization.Encoding.PEM)
+    mtls_cert = "disabled"
+    if server.mtls_cert:
+        mtls_cert = server.mtls_cert.public_bytes(serialization.Encoding.PEM)
+
     keyblob = registrar_client.doRegisterAgent(
         registrar_ip, registrar_port, agent_uuid, ek_tpm, ekcert, aik_tpm, mtls_cert, contact_ip, contact_port)
 

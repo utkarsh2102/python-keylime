@@ -1,3 +1,12 @@
+keylime (6.3.2-1) UNRELEASED; urgency=medium
+
+  [ Thore Sommer ]
+  * New upstream version 6.3.2
+  * d/control: remove python-{simplejson,m2crypto}
+  * Use upstream support for dropping privileges in the agent
+
+ -- Thore Sommer <debian@thson.de>  Thu, 07 Apr 2022 10:53:09 +0200
+
 keylime (6.3.1-1) UNRELEASED; urgency=medium
 
   * New upstream version 6.3.1
