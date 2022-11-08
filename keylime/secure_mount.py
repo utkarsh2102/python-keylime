@@ -1,16 +1,9 @@
-'''
-SPDX-License-Identifier: Apache-2.0
-Copyright 2017 Massachusetts Institute of Technology.
-'''
-
 import os
 import shutil
 
-from keylime import keylime_logging
-from keylime import cmd_exec
-from keylime import config
+from keylime import cmd_exec, config, keylime_logging
 
-logger = keylime_logging.init_logging('secure_mount')
+logger = keylime_logging.init_logging("secure_mount")
 
 # Store the mounted directories done by Keylime, so we can unmount
 # them in reverse order
@@ -21,7 +14,11 @@ def check_mounted(secdir):
     """Inspect mountinfo to detect if a directory is mounted."""
     secdir_escaped = secdir.replace(" ", r"\040")
     with open("/proc/self/mountinfo", "r", encoding="utf-8") as f:
-        for line in f:
+        # because of tests we use readlines() and avoid using iterator
+        # since mocked open cannot use iterator on Python 3.6
+        # see https://code-examples.net/en/q/17a1c75
+        #     https://bugs.python.org/issue21258
+        for line in f.readlines():
             # /proc/[pid]/mountinfo have 10+ elements separated with
             # spaces (check proc (5) for a complete description)
             #
@@ -32,8 +29,7 @@ def check_mounted(secdir):
             try:
                 separator = elements.index("-")
             except ValueError:
-                msg = "Separator field not found. " \
-                    "Information line cannot be parsed"
+                msg = "Separator field not found. Information line cannot be parsed"
                 logger.error(msg)
                 # pylint: disable=raise-missing-from
                 raise Exception(msg)
@@ -47,15 +43,15 @@ def check_mounted(secdir):
             filesystem_type = elements[separator + 1]
             if mount_point == secdir_escaped:
                 if filesystem_type != "tmpfs":
-                    msg = f"Secure storage location {secdir} already mounted " \
-                        f"on wrong file system type: {filesystem_type}. " \
+                    msg = (
+                        f"Secure storage location {secdir} already mounted "
+                        f"on wrong file system type: {filesystem_type}. "
                         "Unmount to continue."
+                    )
                     logger.error(msg)
                     raise Exception(msg)
 
-                logger.debug(
-                    "Secure storage location %s already mounted on tmpfs", secdir
-                )
+                logger.debug("Secure storage location %s already mounted on tmpfs", secdir)
                 return True
 
     logger.debug("Secure storage location %s not mounted", secdir)
@@ -70,6 +66,7 @@ def get_secdir():
 
     return secdir
 
+
 def mount():
     secdir = get_secdir()
 
@@ -82,10 +79,9 @@ def mount():
         # ok now we know it isn't already mounted, go ahead and create and mount
         if not os.path.exists(secdir):
             os.makedirs(secdir, 0o700)
-        size = config.get('cloud_agent', 'secure_size')
+        size = config.get("agent", "secure_size")
         logger.info("mounting secure storage location %s on tmpfs", secdir)
-        cmd = ('mount', '-t', 'tmpfs', '-o', f'size={size},mode=0700',
-               'tmpfs', secdir)
+        cmd = ("mount", "-t", "tmpfs", "-o", f"size={size},mode=0700", "tmpfs", secdir)
         cmd_exec.run(cmd)
         _MOUNTED.append(secdir)
 
@@ -110,8 +106,10 @@ def umount():
             cmd = ("umount", directory)
             ret = cmd_exec.run(cmd, raiseOnError=False)
             if ret["code"] != 0:
-                logger.error("%s cannot be umounted. "
-                             "A running process can be keeping it bussy: %s",
-                             directory, str(ret["reterr"]))
+                logger.error(
+                    "%s cannot be umounted. A running process can be keeping it bussy: %s",
+                    directory,
+                    str(ret["reterr"]),
+                )
         else:
             logger.warning("%s already unmounted by another process", directory)

@@ -9,7 +9,7 @@ to make via an [issue](https://github.com/keylime/keylime/issues) or email to th
    outlining the fix or feature.
 2. Fork the keylime repository to your own github account and clone it locally.
 3. Hack on your changes.
-4. Update the README.md or documentation in [keylime-docs](https://github.com/keylime/keylime-docs)
+4. Update the README.md or documentation in the `docs/` directory
    with details of changes to any interface, this includes new environment
    variables, exposed ports, useful file locations, CLI parameters and
    new or changed configuration values.
@@ -20,6 +20,16 @@ to make via an [issue](https://github.com/keylime/keylime/issues) or email to th
    before merging.
 8. If your pull request consists of more than one commit, please squash your
    commits as decribed in [Squash Commits](#Squash Commits)
+
+## Code style
+
+Keylime uses [Black](https://black.readthedocs.io/en/stable/) and [isort](https://pycqa.github.io/isort/) to enforce a 
+consistent code style. We provide a [pre-commit](https://pre-commit.com/) configuration to enforce the code style 
+locally and the CI will check if the code is formatted correctly. For usage and installation instructions see the 
+[pre-commit](https://pre-commit.com/) website.
+
+Black and isort can also be run manually, but please make sure that the versions used are the ones specified in the 
+`.pre-commit-config.yaml`.
 
 ## Commit Message Guidelines
 

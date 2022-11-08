@@ -1,8 +1,9 @@
 # Keylime
 
 [![Slack CNCF chat](https://img.shields.io/badge/Chat-CNCF%20Slack-informational)](https://cloud-native.slack.com/archives/C01ARE2QUTZ)
+[![Docs Status](https://readthedocs.org/projects/keylime/badge/?version=latest)](https://keylime.readthedocs.io/en/latest/?badge=latest)
 
-![keylime](doc/keylime.png?raw=true "Title")
+![keylime](docs/keylime.png?raw=true "Title")
 
 Keylime is an open-source scalable trust system harnessing TPM Technology.
 
@@ -20,8 +21,7 @@ remotely attest machines not under their own full control (such as a consumer of
 hybrid cloud or a remote Edge / IoT device in an insecure physical tamper prone
 location.)
 
-Keylime can be driven with a CLI application, web front end, and a set of
-RESTful APIs.
+Keylime can be driven with a CLI application and a set of RESTful APIs.
 
 Keylime consists of three main components; The Verifier, Registrar and the
 Agent.
@@ -38,18 +38,19 @@ with secrets stored within an encrypted payload released once trust is establish
 ### Rust based Keylime Agent
 
 The verifier, registrar, and agent are all developed in Python and situated
-in this repository `keylime`. The agent is currently undergoing a port to the
-[Rust programming language](https://www.rust-lang.org), with this work taking
-place in the [rust-keylime repository](https://github.com/keylime/rust-keylime).
+in this repository `keylime`. The agent was ported to the
+[Rust programming language](https://www.rust-lang.org). The code can be found 
+in the [rust-keylime repository](https://github.com/keylime/rust-keylime).
 
-The decision was made to port the agent to Rust, as rust is a low level
+The decision was made to port the agent to Rust, as rust is a low-level
 performant systems language designed with security as a central tenet, by means
-of the rust compilers ownership model.
+of the rust compiler's ownership model.
 
-When the rust agent work is complete, the rust-keylime agent will become the
-recommended ongoing agent within Keylime. Until then the Python agent is
-fully functioning and available to use as a remote monitoring system to interact
-with the keylime verifier and registrar.
+Starting with the 0.1.0 release of the Rust based Keylime agent, this agent is now the official agent.
+
+| IMPORTANT: The Python version is deprecated and will be removed with the next major version (7.0.0)! |
+|------------------------------------------------------------------------------------------------------|
+
 
 ### TPM Support
 
@@ -84,17 +85,19 @@ A hardware TPM should always be used when real secrets and trust is required.
 
 ## Installation
 
-### Installer script
+### Automated
+
+#### Using installer script
 
 Keylimes installer requires Python 3.6 or greater.
 
-The following command line options are available using `installer.sh` script:
+The following command line options are available using 
+[installer.sh](https://github.com/keylime/keylime/blob/master/installer.sh) script:
 
 ```
 Usage: ./installer.sh [option...]
 Options:
 -k              Download Keylime (stub installer mode)
--o              Use OpenSSL instead of CFSSL
 -t              Create tarball with keylime_agent
 -m              Use modern TPM 2.0 libraries (vs. TPM 1.2)
 -s              Install & use a Software TPM emulator (development only)
@@ -106,8 +109,6 @@ Should you not have the Keylime repository on your local machine, you can
 use the `-k` flag which will download the software. In this case, all you need
 is the `installer.sh` script locally.
 
-Note that CFSSL is required if you want to support revocation. As noted above, do not use the TPM emulator option `-s` in production systems.
-
 #### Installer Distribution coverage
 
 | Distribution  | Versions      | TPM2-Software   |
@@ -117,7 +118,7 @@ Note that CFSSL is required if you want to support revocation. As noted above, d
 | Fedora        | 32 / 33 / 34  | Package Install |
 | Ubuntu        | 19 LTS / 20   | Compiled        |
 
-### Ansible
+#### Ansible
 
 Ansible roles are available to deploy keylime for use with a hardware TPM or a software TPM emulator. 
 Please proceed to the [Keylime Ansible
@@ -128,16 +129,25 @@ Repository](https://github.com/keylime/ansible-keylime-tpm-emulator).
 | WARNING: The "Keylime Ansible TPM Emulator" role uses a software TPM, which is considered cryptographically insecure. It should only be used for development or testing and **NOT** in production!|
 | --- |
 
-### Docker (Development Only)
 
-keylime and related emulators can also be deployed using Docker.
-Since this docker configuration currently uses a TPM emulator,
+#### Docker (Production)
+The verifier, registrar and tenant can be deployed using Docker images.
+Keylime's official images can be found [here](https://quay.io/organization/keylime).
+Those are automatically generated for every commit and release.
+
+For building those images locally see 
+[here](https://github.com/keylime/keylime/blob/master/docker/release/build_locally.sh>).
+
+#### Docker (Development)
+
+Keylime and related emulators can also be run using Docker for development.
+Since this Docker configuration currently uses a TPM emulator,
 it should only be used for development or testing and NOT in production.
 
 Please see either the 
 [Dockerfiles](https://github.com/keylime/keylime/tree/master/docker) or our
 [local CI script](https://github.com/keylime/keylime/blob/master/.ci/run_local.sh)
-which will automate the build and pull of keylime.
+which will automate the build and pull of Keylime.
 
 ### Manual
 
@@ -166,36 +176,17 @@ These can be installed using your package manager.
 
 * On Fedora 32 (and greater):
 
-`sudo dnf install tpm2-tss tpm2-tools tpm2-abrmd`
+`sudo dnf install tpm2-tss tpm2-tools`
 
-* On Ubuntu 20 LTS:
+* On Ubuntu 20 LTS (and greater):
 
-`sudo apt-get install tpm2-tss tpm2-tools tpm2-abrmd`
+`sudo apt-get install tpm2-tools`
 
 You can also build the [tpm2-tss](https://github.com/tpm2-software/tpm2-tss) software stack as well as
 [tpm2-tools](https://github.com/tpm2-software/tpm2-tools) instead . See the
 README.md in these projects for detailed instructions on how to build and install.
 
-The brief synopsis of a quick build/install (after installing dependencies) is:
-
-```bash
-git clone https://github.com/tpm2-software/tpm2-tss.git tpm2-tss
-pushd tpm2-tss
-./bootstrap
-./configure --prefix=/usr
-make
-sudo make install
-popd
-
-git clone https://github.com/tpm2-software/tpm2-tools.git tpm2-tools
-pushd tpm2-tools
-./bootstrap
-./configure --prefix=/usr/local
-make
-sudo make install
-```
-
-To ensure that you have the patched version installed ensure that you have
+To ensure that you have the supported version installed ensure that you have
 the `tpm2_checkquote` utility in your path.
 
 ###### TPM 2.0 Access
@@ -225,12 +216,6 @@ You're finally ready to install keylime!
 sudo python3 -m pip install . -r requirements.txt
 ```
 
-#### Optional Requirements
-
-If you want to support revocation, you also need to have cfssl installed and in your
-path on the tenant agent. It can be obtained from https://github.com/cloudflare/cfssl. 
-You will also need to set ca_implementation to "cfssl" instead of "openssl" in `/etc/keylime.conf`.
-
 ## Making sure your TPM is ready for keylime
 
 The above instructions for installing the TPM libraries will be configured
@@ -247,7 +232,7 @@ info from the driver using:
 `sudo find /sys -name tpm0`
 
 Several results may be returned, but the duplicates are just symlinks to one
-location.  Go to one of the returned paths, for example, /sys/class/misc/tpm0.  Now
+location.  Go to one of the returned paths, for example, `/sys/class/misc/tpm0`.  Now
 change to the device directory.  Here you can find some information from the TPM like
 the current pcr values and sometimes the public EK is available.  It will also report
 two important state values: active and enabled.  To use keylime, both of these must
@@ -257,12 +242,14 @@ then activate and finally reboot again.  It is also possible that you may need t
 assert physical presence (see manual for your system on how to do this) in order to
 accomplish these actions in your BIOS.
 
-If your system shows enabled and activated, you can next check the "owned"
-status in the /sys directory.  Keylime can take a system that is not owned (i.e., owned = 0)
-and take control of it.  Keylime can also take a system that is already owned,
-provided that you know the owner password and that keylime or another trusted
-computing system that relies upon tpm4720 previously took ownership.  If you know
-the owner password, you can set the option tpm_ownerpassword in keylime.conf to this known value.
+If your system shows enabled and active, you can next check the "owned" status
+in the /sys directory. The [sysfs ABI](https://www.kernel.org/doc/Documentation/ABI/stable/sysfs-class-tpm) lists
+where the kernel populates these entries. Keylime can take a system that is not
+owned (i.e., owned = 0) and take control of it.  Keylime can also take a system
+that is already owned, provided that you know the owner password and that
+keylime or another trusted computing system that relies upon tpm4720 previously
+took ownership.  If you know the owner password, you can set the option
+`tpm_ownerpassword` in `keylime.conf` to this known value.
 
 ## Usage
 
@@ -292,13 +279,15 @@ securely with the agent.  The verifier uses mutual TLS for its control interface
 * The *agent* is the target of bootstrapping and integrity measurements.  It puts
     its stuff into `/var/lib/keylime/`.
 
+If you are using the TPM emulator make sure that `TPM2TOOLS_TCTI` is correctly set with: 
+`export TPM2TOOLS_TCTI="mssim:port=2321"`.
 To run a basic test, run `keylime_verifier`, `keylime_registrar`, and `keylime_agent`.  If
 the agent starts up properly, then you can proceed.
 
 ### Provisioning
 
 To kick everything off you need to tell keylime to provision a machine. This can be
-done either with the keylime tenant or webapp.
+done with the keylime tenant.
 
 #### Provisioning with keylime_tenant
 
@@ -319,15 +308,6 @@ To stop keylime from requesting attestations:
 For additional advanced options for the tenant utility run:
 
 `keylime_tenant -h`
-
-#### Provisioning with keylime_webapp
-
-There is also a WebApp GUI interface for the tenant, available by
-running `keylime_webapp`.  Next, simply navigate to the WebApp in
-your web browser (https://localhost/webapp/ by default, as specified in `/etc/keylime.conf`).
-
-Note that the webapp must be run on the same machine as the tenant, since it
-uses its keys for TLS authentication in `/var/lib/keylime/`.
 
 ### Using keylime CA
 
@@ -381,7 +361,7 @@ CRL.  To enable this feature, run:
 
 The revocation key will be automatically created by the tenant the first time
 you use the CA with keylime.  Currently the CRL is only written back to the CA
-directory, unless IPsec configuration is being used (see [Additional Reading](#additional-reading)).
+directory.
 
 ## Systemd service support
 
@@ -438,19 +418,14 @@ Please, see [TESTING.md](TESTING.md) for details.
 
 ## Additional Reading
 
-* Executive summary Keylime slides: [doc/keylime-elevator-slides.pptx](https://github.com/keylime/keylime/raw/master/doc/keylime-elevator-slides.pptx)
-* Detailed Keylime Architecture slides: [doc/keylime-detailed-architecture-v7.pptx](https://github.com/keylime/keylime/raw/master/doc/keylime-detailed-architecture-v7.pptx)
-* See ACSAC 2016 paper in doc directory: [doc/tci-acm.pdf](https://github.com/keylime/keylime/blob/master/doc/tci-acm.pdf)
-  * and the ACSAC presentation on keylime: [doc/llsrc-keylime-acsac-v6.pptx](https://github.com/keylime/keylime/raw/master/doc/llsrc-keylime-acsac-v6.pptx)
-* See the HotCloud 2018 paper: [doc/hotcloud18.pdf](https://github.com/keylime/keylime/blob/master/doc/hotcloud18.pdf)
-* Details about Keylime REST API: [doc/keylime RESTful API.docx](https://github.com/keylime/keylime/raw/master/doc/keylime%20RESTful%20API.docx)
-* [Bundling a portable Cloud Agent](doc/cloud-agent-tarball-notes.md) - Create portable tarball of Cloud Agent, for usage on systems without python and other dependencies.
-* [Xen vTPM setup notes](doc/xen-vtpm-notes.md) - Guidance on getting Xen set up with vTPM support for Keylime.
-* IPsec Configurations
-  * [IPsec with Libreswan](auto-ipsec/libreswan) - Configuring Keylime with a Libreswan backend for IPsec functionality.
-  * [IPsec with Racoon](auto-ipsec/racoon) - Configuring Keylime with a Racoon backend for IPsec functionality.
+* Executive summary Keylime slides: [docs/old/keylime-elevator-slides.pptx](https://github.com/keylime/keylime/raw/master/docs/old/keylime-elevator-slides.pptx)
+* Detailed Keylime Architecture slides: [docs/old/keylime-detailed-architecture-v7.pptx](https://github.com/keylime/keylime/raw/master/docs/old/keylime-detailed-architecture-v7.pptx)
+* See ACSAC 2016 paper in doc directory: [docs/old/tci-acm.pdf](https://github.com/keylime/keylime/blob/master/docs/old/tci-acm.pdf)
+  * and the ACSAC presentation on keylime: [docs/old/llsrc-keylime-acsac-v6.pptx](https://github.com/keylime/keylime/raw/master/docs/old/llsrc-keylime-acsac-v6.pptx)
+* See the HotCloud 2018 paper: [docs/old/hotcloud18.pdf](https://github.com/keylime/keylime/blob/master/docs/old/hotcloud18.pdf)
+* Details about Keylime REST API: [docs/old/keylime RESTful API.docx](https://github.com/keylime/keylime/raw/master/docs/old/keylime%20RESTful%20API.docx)
+* [Bundling a portable Cloud Agent](https://github.com/keylime/keylime/blob/master/docs/old/cloud-agent-tarball-notes.md) - Create portable tarball of Cloud Agent, for usage on systems without python and other dependencies.
 * [Demo files](demo/) - Some pre-packaged demos to show off what Keylime can do.
-* [Stubbed TPM/vTPM notes](doc/stub-tpm-notes.md) - Explains how to use Keylime with canned/simulated TPM behavior (useful for testing).
 * [IMA stub service](ima_stub_service/) - Allows you to test IMA and keylime on a machine without a TPM.  Service keeps emulated TPM synchronized with IMA.
 
 #### Errata from the ACSAC Paper

@@ -1,14 +1,6 @@
-#!/usr/bin/python3
+from keylime import keylime_agent, keylime_logging
 
-'''
-SPDX-License-Identifier: Apache-2.0
-Copyright 2017 Massachusetts Institute of Technology.
-'''
-
-from keylime import keylime_logging
-from keylime import keylime_agent
-
-logger = keylime_logging.init_logging('cloudagent')
+logger = keylime_logging.init_logging("cloudagent")
 
 
 def main():
