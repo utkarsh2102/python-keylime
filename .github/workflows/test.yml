@@ -9,6 +9,12 @@ on:
   workflow_dispatch:
 
 jobs:
+  style-checks:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v2
+    - uses: actions/setup-python@v2
+    - uses: pre-commit/action@v2.0.3
   tpm-tests:
     runs-on: ubuntu-latest
     container:
@@ -34,6 +40,6 @@ jobs:
     - name: Install build dependencies
       run: sudo dnf -y install swig
     - name: Install Python dependencies
-      run: python3 -m pip install tox
+      run: sudo dnf -y install python3.6 tox
     - name: Run lints
-      run: tox -vv -epylint
+      run: tox -vv -e 'pylint,pylint36'

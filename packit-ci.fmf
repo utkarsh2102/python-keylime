@@ -1,10 +1,16 @@
-/e2e:
+/e2e-with-revocation:
 
   summary: run keylime e2e tests
 
+  context:
+    swtpm: yes
+    agent: python
+
   prepare:
     how: shell
-    script: bash -c 'ln -s $(pwd) /var/tmp/keylime_sources'
+    script:
+     - rm -f /etc/yum.repos.d/tag-repository.repo
+     - ln -s $(pwd) /var/tmp/keylime_sources
 
   discover:
     how: fmf
@@ -14,27 +20,45 @@
      - /setup/configure_tpm_emulator
      - /setup/install_upstream_keylime
      - /setup/enable_keylime_coverage
+     # change IMA policy to simple and run one attestation scenario
+     # this is to utilize also a different parser
+     - /setup/configure_kernel_ima_module/ima_policy_simple
      - /functional/basic-attestation-on-localhost
+     # now change IMA policy to signing and run all tests
+     - /setup/configure_kernel_ima_module/ima_policy_signing
+     - /functional/basic-attestation-on-localhost
+     - /functional/basic-attestation-with-custom-certificates
+     - /functional/basic-attestation-with-ima-signatures 
+     - /functional/basic-attestation-without-mtls
      - /functional/basic-attestation-with-unpriviledged-agent
+     - /functional/ek-cert-use-ek_check_script
+     - /functional/ek-cert-use-ek_handle-custom-ca_certs
+     - /functional/install-rpm-with-ima-signature
      - /functional/keylime_tenant-commands-on-localhost
+     - /functional/keylime_tenant-ima-signature-sanity
      - /functional/tpm_policy-sanity-on-localhost
      - /functional/db-postgresql-sanity-on-localhost
      - /functional/db-mariadb-sanity-on-localhost
      - /functional/db-mysql-sanity-on-localhost
      - /functional/tenant-allowlist-sanity
+     - /functional/measured-boot-swtpm-sanity
+     # now set zeromq as a default revocation notifier and test it
+     - /setup/configure_default_revocation_notifier/zeromq
+     - /functional/basic-attestation-on-localhost
+     # now set revocation notifier back to agent
+     - /setup/configure_default_revocation_notifier/agent
+     - /upstream/run_keylime_tests
      - /setup/generate_coverage_report
 
   adjust:
    # prepare step adjustments
-   - prepare:
-       script:
-        - bash -c 'ln -s $(pwd) /var/tmp/keylime_sources'
+   - prepare+:
+       script+:
         - yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
      when: distro == centos-stream-9
 
-   - prepare:
-       script:
-        - bash -c 'ln -s $(pwd) /var/tmp/keylime_sources'
+   - prepare+:
+       script+:
         - yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
      when: distro == centos-stream-8
 
@@ -45,6 +69,50 @@
        test-:
         - /setup/enable_keylime_coverage
         - /setup/generate_coverage_report
+
+  execute:
+    how: tmt
+
+/e2e-without-revocation:
+
+  summary: run keylime e2e tests without revocation support
+
+  environment:
+    KEYLIME_TEST_DISABLE_REVOCATION: 1
+
+  context:
+    swtpm: yes
+    agent: python
+
+  prepare:
+    how: shell
+    script:
+     - rm -f /etc/yum.repos.d/tag-repository.repo
+     - ln -s $(pwd) /var/tmp/keylime_sources
+
+  discover:
+    how: fmf
+    url: https://github.com/RedHat-SP-Security/keylime-tests
+    ref: main
+    test:
+     - /setup/configure_tpm_emulator
+     - /setup/install_upstream_keylime
+     - /functional/basic-attestation-on-localhost
+     - /functional/basic-attestation-with-custom-certificates
+     - /functional/basic-attestation-without-mtls
+     - /functional/basic-attestation-with-unpriviledged-agent
+
+  adjust:
+   # prepare step adjustments
+   - prepare+:
+       script+:
+        - yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm
+     when: distro == centos-stream-9
+
+   - prepare+:
+       script+:
+        - yum -y install https://dl.fedoraproject.org/pub/epel/epel-release-latest-8.noarch.rpm
+     when: distro == centos-stream-8
 
   execute:
     how: tmt

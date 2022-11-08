@@ -1,16 +1,16 @@
-'''
+"""
 SPDX-License-Identifier: Apache-2.0
 Copyright 2021 Red Hat, Inc
-'''
+"""
 
 import unittest
 
 from keylime import api_version
 
-class APIVersion_Test(unittest.TestCase):
 
+class APIVersion_Test(unittest.TestCase):
     def test_current_version(self):
-        self.assertEqual(api_version.current_version(), "2.0", "Current version is 2.0")
+        self.assertEqual(api_version.current_version(), "2.1", "Current version is 2.1")
 
     def test_latest_minor_version(self):
         self.assertEqual(api_version.latest_minor_version("1.0"), "1.0", "Latest version of 1.0 is 1.0")
@@ -41,5 +41,5 @@ class APIVersion_Test(unittest.TestCase):
         self.assertFalse(api_version.is_supported_version("vader"), "vader is not a supported version")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

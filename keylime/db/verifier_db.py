@@ -1,14 +1,8 @@
-'''
-SPDX-License-Identifier: Apache-2.0
-Copyright 2020 Luke Hinds (lhinds@redhat.com), Red Hat, Inc.
-'''
-
+from sqlalchemy import Column, ForeignKey, Integer, LargeBinary, PickleType, String, Text, schema
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy import Column, String, Integer, PickleType, Text, LargeBinary
-from sqlalchemy import schema
+from sqlalchemy.orm import relationship
 
 from keylime.json import JSONPickler
-
 
 Base = declarative_base()
 
@@ -19,9 +13,8 @@ class JSONPickleType(PickleType):  # pylint: disable=abstract-method
 
 
 class VerfierMain(Base):
-    __tablename__ = 'verifiermain'
-    agent_id = Column(String(80),
-                      primary_key=True)
+    __tablename__ = "verifiermain"
+    agent_id = Column(String(80), primary_key=True)
     v = Column(String(45))
     ip = Column(String(15))
     verifier_id = Column(String(80))
@@ -31,9 +24,9 @@ class VerfierMain(Base):
     operational_state = Column(Integer)
     public_key = Column(String(500))
     tpm_policy = Column(JSONPickleType(pickler=JSONPickler))
-    vtpm_policy = Column(JSONPickleType(pickler=JSONPickler))
     meta_data = Column(String(200))
-    allowlist = Column(Text().with_variant(Text(429400000), "mysql"))
+    ima_policy = relationship("VerifierAllowlist", back_populates="agent", uselist=False)
+    ima_policy_id = Column(Integer, ForeignKey("allowlists.id"))
     ima_sign_verification_keys = Column(Text().with_variant(Text(429400000), "mysql"))
     mb_refstate = Column(Text().with_variant(Text(429400000), "mysql"))
     revocation_key = Column(String(2800))
@@ -53,15 +46,16 @@ class VerfierMain(Base):
     supported_version = Column(String(20))
     ak_tpm = Column(String(500))
     mtls_cert = Column(String(2048), nullable=True)
+    attestation_count = Column(Integer)
+    last_received_quote = Column(Integer)
+    tpm_clockinfo = Column(JSONPickleType(pickler=JSONPickler))
 
 
 class VerifierAllowlist(Base):
-    __tablename__ = 'allowlists'
-    __table_args__ = (
-        schema.UniqueConstraint('name', name='uniq_allowlists0name'),
-    )
+    __tablename__ = "allowlists"
+    __table_args__ = (schema.UniqueConstraint("name", name="uniq_allowlists0name"),)
     id = Column(Integer, primary_key=True)
+    agent = relationship("VerfierMain", back_populates="ima_policy")
     name = Column(String(255), nullable=False)
     tpm_policy = Column(Text())
-    vtpm_policy = Column(Text())
     ima_policy = Column(Text().with_variant(Text(429400000), "mysql"))

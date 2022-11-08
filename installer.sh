@@ -6,13 +6,11 @@
 
 # Configure the installer here
 KEYLIME_GIT=https://github.com/keylime/keylime.git
-GOLANG_SRC=https://dl.google.com/go
 TPM2TSS_GIT=https://github.com/tpm2-software/tpm2-tss.git
 TPM2TOOLS_GIT=https://github.com/tpm2-software/tpm2-tools.git
 TPM2SIM_SRC=http://sourceforge.net/projects/ibmswtpm2/files/ibmtpm1119.tar.gz/download
 KEYLIME_VER="master"
 TPM4720_VER="master"
-GOLANG_VER="1.13.1"
 TPM2TSS_VER="3.2.x"
 TPM2TOOLS_VER="5.1.X"
 
@@ -20,14 +18,11 @@ TPM2TOOLS_VER="5.1.X"
 MIN_PYTHON_VERSION="3.6.7"
 MIN_PYSETUPTOOLS_VERSION="0.7"
 MIN_PYTORNADO_VERSION="4.3"
-MIN_PYM2CRYPTO_VERSION="0.21.1"
 MIN_PYZMQ_VERSION="14.4"
 MIN_PYCRYPTOGRAPHY_VERSION="2.1.4"
-MIN_GO_VERSION="1.11.13"
 
 # default variables
 CENTOS7_TSS_FLAGS=
-GOPKG=
 NEED_BUILD_TOOLS=0
 NEED_PYTHON_DIR=0
 PYTHON_PIPS=
@@ -63,7 +58,7 @@ case "$ID" in
         echo "${ID} selected."
         PACKAGE_MGR=$(command -v apt-get)
         PYTHON_PREIN="git patch"
-        PYTHON_DEPS="python3 python3-pip python3-dev python3-setuptools python3-zmq python3-tornado python3-cryptography python3-requests python3-psutil gcc g++ libssl-dev swig python3-yaml python3-gnupg wget"
+        PYTHON_DEPS="python3 python3-pip python3-dev python3-setuptools python3-zmq python3-tornado python3-cryptography python3-requests python3-psutil gcc g++ libssl-dev swig python3-yaml python3-gpg python3-lark wget python3-alembic"
         if [ "$(uname -m)" = "x86_64" ]; then
             PYTHON_DEPS+=" libefivar-dev"
         fi
@@ -88,7 +83,7 @@ case "$ID" in
                 PACKAGE_MGR=$(command -v yum)
                 NEED_EPEL=1
                 PYTHON_PREIN="python36 python36-devel python36-setuptools python36-pip git wget patch openssl"
-                PYTHON_DEPS="gcc gcc-c++ openssl-devel swig python36-PyYAML python36-tornado python36-cryptography python36-requests python36-zmq yaml-cpp-devel python3-psutil"
+                PYTHON_DEPS="gcc gcc-c++ openssl-devel swig python36-PyYAML python36-tornado python36-cryptography python36-requests python36-zmq yaml-cpp-devel python3-psutil python3-alembic"
                 if [ "$(uname -m)" = "x86_64" ]; then
                     PYTHON_DEPS+=" efivar-libs"
                 fi
@@ -101,15 +96,20 @@ case "$ID" in
                 PACKAGE_MGR=$(command -v dnf)
                 NEED_EPEL=1
                 PYTHON_PREIN="python3 python3-devel python3-setuptools python3-pip"
-                PYTHON_DEPS="gcc gcc-c++ openssl-devel python3-yaml python3-requests swig python3-cryptography wget git python3-tornado python3-zmq python3-gnupg python3-psutil"
+                PYTHON_DEPS="gcc gcc-c++ openssl-devel python3-yaml python3-requests swig python3-cryptography wget git python3-tornado python3-zmq python3-gpg python3-psutil"
                 if [ "$(uname -m)" = "x86_64" ]; then
                     PYTHON_DEPS+=" efivar-libs"
                 fi
-                BUILD_TOOLS="git wget patch libyaml openssl-devel libtool make automake m4 libgcrypt-devel autoconf libcurl-devel libstdc++-devel dbus-devel libuuid-devel json-c-devel"
+                BUILD_TOOLS="git wget patch libyaml openssl-devel libtool make automake m4 libgcrypt-devel autoconf libcurl-devel libstdc++-devel dbus-devel libuuid-devel json-c-devel autoconf-archive"
                 #TPM2_TOOLS_PKGS="tpm2-tss tpm2-tools" TODO: still on 3.1.1 tpm2_tools
                 NEED_BUILD_TOOLS=1
                 NEED_PYTHON_DIR=1
-                POWERTOOLS="--enablerepo=PowerTools install autoconf-archive"
+                if test "$ID" = centos; then
+                    POWERTOOLS="--enablerepo=PowerTools"
+                else
+                    POWERTOOLS="config-manager --set-enabled rhui-codeready-builder-for-rhel-8-x86_64-rhui-source-rpms"
+                fi 
+
             ;;
             *)
                 echo "Version ${VERSION_ID} of ${ID} not supported"
@@ -121,17 +121,15 @@ case "$ID" in
         echo "${ID} selected."
         PACKAGE_MGR=$(command -v dnf)
         PYTHON_PREIN="python3 python3-devel python3-setuptools git wget patch"
-        PYTHON_DEPS="python3-pip gcc gcc-c++ openssl-devel swig python3-pyyaml python3-m2crypto  python3-zmq python3-cryptography python3-tornado python3-requests python3-gnupg yaml-cpp-devel procps-ng python3-psutil"
+        PYTHON_DEPS="python3-pip gcc gcc-c++ openssl-devel swig python3-pyyaml python3-zmq python3-cryptography python3-tornado python3-requests python3-gpg yaml-cpp-devel procps-ng python3-psutil python3-lark-parser python3-alembic"
         if [ "$(uname -m)" = "x86_64" ]; then
             PYTHON_DEPS+=" efivar-devel"
         fi
         BUILD_TOOLS="openssl-devel libtool make automake pkg-config m4 libgcrypt-devel autoconf autoconf-archive libcurl-devel libstdc++-devel uriparser-devel dbus-devel gnulib-devel doxygen libuuid-devel json-c-devel"
-        GOPKG="golang"
         if [[ ${VERSION_ID} -ge 30 ]] ; then
         # if fedora 30 or greater, then using TPM2 tool packages
             TPM2_TOOLS_PKGS="tpm2-tools tpm2-tss tss2"
             NEED_BUILD_TOOLS=0
-            HAS_GO_PKG=1
         else
             NEED_BUILD_TOOLS=1
         fi
@@ -145,7 +143,6 @@ esac
 # Command line params
 STUB=0
 KEYLIME_DIR=
-OPENSSL=1
 TARBALL=0
 TPM_SOCKET=0
 while getopts ":shctkmp:" opt; do
@@ -158,7 +155,6 @@ while getopts ":shctkmp:" opt; do
                 KEYLIME_DIR=`pwd`"/$KEYLIME_DIR"
             fi
             ;;
-        c) OPENSSL=0 ;;
         t) TARBALL=1 ;;
         m) ;;
         s) TPM_SOCKET=1 NEED_BUILD_TOOLS=1 ;;
@@ -166,7 +162,6 @@ while getopts ":shctkmp:" opt; do
             echo "Usage: $0 [option...]"
             echo "Options:"
             echo $'-k \t\t\t\t Download Keylime (stub installer mode)'
-            echo $'-c \t\t\t\t Use CFSSL (vs. OpenSSL). NOTE: OpenSSL does not support revocation'
             echo $'-t \t\t\t\t Create tarball with keylime_agent'
             echo $'-m \t\t\t\t Use modern TPM 2.0 libraries; this is the default'
             echo $'-s \t\t\t\t Install & use a Software TPM emulator (development only)'
@@ -189,11 +184,11 @@ echo "==========================================================================
 echo $'\t\t\tInstalling python & crypto libs'
 echo "=================================================================================="
 if [[ "$NEED_EPEL" -eq "1" ]] ; then
-	$PACKAGE_MGR -y install epel-release
-	if [[ $? > 0 ]] ; then
-    	echo "ERROR: EPEL package failed to install properly!"
-    	exit 1
-	fi
+    $PACKAGE_MGR -y install epel-release
+    if [[ $? > 0 ]] ; then
+        echo "ERROR: EPEL package failed to install properly!"
+        exit 1
+    fi
 fi
 
 $PACKAGE_MGR install -y $PYTHON_PREIN
@@ -232,12 +227,6 @@ else
     pynado_ver=$(python3 -c 'import tornado; print(tornado.version)')
     if ! $(version_checker "$MIN_PYTORNADO_VERSION" "$pynado_ver"); then
         confirm_force_install "ERROR: Minimum python-tornado version is $MIN_PYTORNADO_VERSION, but $pynado_ver is installed!" || exit 1
-    fi
-
-    # Ensure Python M2Crypto installed meets min requirements
-    pym2_ver=$(python3 -c 'import M2Crypto; print(M2Crypto.version)')
-    if ! $(version_checker "$MIN_PYM2CRYPTO_VERSION" "$pym2_ver"); then
-        confirm_force_install "ERROR: Minimum python-M2Crypto version is $MIN_PYM2CRYPTO_VERSION, but $pym2_ver is installed!" || exit 1
     fi
 
     # Ensure Python ZeroMQ installed meets min requirements
@@ -291,114 +280,6 @@ fi
 
 echo "INFO: Using Keylime directory: $KEYLIME_DIR"
 
-
-# OpenSSL or cfssl?
-if [[ "$OPENSSL" -eq "0" ]] ; then
-    # Pull in correct PATH under sudo (mainly for secure_path)
-    if [[ -r "/etc/profile.d/go.sh" ]]; then
-        source "/etc/profile.d/go.sh"
-    fi
-
-    if [[ "$HAS_GO_PKG" -eq "1" ]] ; then
-        $PACKAGE_MGR install -y $GOPKG
-        if [[ $? > 0 ]] ; then
-            echo "ERROR: Package(s) failed to install properly!"
-            exit 1
-        fi
-    fi
-
-    if [[ ! `command -v go` ]] ; then
-        # Install golang (if not already)
-        echo
-        echo "=================================================================================="
-        echo $'\t\t\tInstalling golang (for cfssl)'
-        echo "=================================================================================="
-
-        # Where should golang's root be?
-        # NOTE: If this is changed, golang requires GOROOT to be set!
-        GO_INSTALL_TARGET="/usr/local"
-
-        # Don't risk clobbering anything if there are traces of golang already on the system
-        if [[ -d "$GO_INSTALL_TARGET/go" ]] ; then
-            # They have an install (just not on PATH?)
-            echo "The '$GO_INSTALL_TARGET/go' directory already exists.  Aborting installation attempt."
-            exit 1
-        fi
-
-        # Figure out which version of golang to download
-        PLATFORM_STR=$( uname -s )-$( uname -m )
-        case "$PLATFORM_STR" in
-            Linux-x86_64) GOFILE_STR="go$GOLANG_VER.linux-amd64.tar.gz" ;;
-            Linux-i686) GOFILE_STR="go$GOLANG_VER.linux-386.tar.gz" ;;
-            Linux-i386) GOFILE_STR="go$GOLANG_VER.linux-386.tar.gz" ;;
-            Darwin-x86_64) GOFILE_STR="go$GOLANG_VER.darwin-amd64.tar.gz" ;;
-            *)
-                echo "ERROR: Cannot install golang for your platform ($PLATFORM_STR)!"
-                echo "Please manually install golang $MIN_GO_VERSION or higher."
-                exit 1
-                ;;
-        esac
-
-        # Download and unpack/install golang
-        TMPFILE=`mktemp -t go.XXXXXXXXXX.tar.gz` || exit 1
-        wget "$GOLANG_SRC/$GOFILE_STR" -O $TMPFILE
-        if [[ $? -ne 0 ]] ; then
-            echo "ERROR: Failed to download golang!"
-            exit 1
-        fi
-        tar -C "$GO_INSTALL_TARGET" -xzf $TMPFILE
-
-        # Set up working directory and env vars (+persistence)
-        mkdir -p $HOME/go
-        export GOPATH=$HOME/go
-        export PATH=$PATH:$GO_INSTALL_TARGET/go/bin:$GOPATH/bin:/usr/local/bin
-        {
-            echo $'\n# Golang-related settings'
-            echo 'export GOPATH=$HOME/go'
-            echo "export PATH=\$PATH:$GO_INSTALL_TARGET/go/bin:\$GOPATH/bin:/usr/local/bin"
-        } >> "$HOME/.bashrc"
-        if [[ -d "/etc/profile.d" ]]; then
-            {
-                echo $'\n# Golang-related settings'
-                echo "export PATH=\$PATH:$GO_INSTALL_TARGET/go/bin:/usr/local/bin"
-            } >> "/etc/profile.d/go.sh"
-        fi
-    fi
-
-    if [[ -z "$GOPATH" ]] ; then
-        # GOPATH is not set up correctly
-        echo "ERROR: GOPATH is not set up correctly!  This is required for cfssl."
-        echo "Do you want to setup a default GOPATH with the following:"
-        echo " mkdir -p $HOME/go && echo 'export GOPATH=$HOME/go' >> $HOME/.bashrc && source $HOME/.bashrc"
-        read -r -p "Proceed? [y/N] " resp
-        case "$resp" in
-            [yY]) mkdir -p $HOME/go && echo 'export GOPATH=$HOME/go' >> $HOME/.bashrc && source $HOME/.bashrc ;;
-            *) exit 1 ;;
-        esac
-    fi
-
-    # Ensure Go installed meets min requirements
-    go_ver=$(go version | cut -d" " -f3 | sed "s/go//")
-    if ! $(version_checker "$MIN_GO_VERSION" "$go_ver"); then
-        confirm_force_install "ERROR: Minimum Go version is $MIN_GO_VERSION, but $go_ver is installed!" || exit 1
-    fi
-
-    if [[ ! `command -v cfssl` ]] ; then
-        # Install cfssl (if not already)
-        echo
-        echo "=================================================================================="
-        echo $'\t\t\t\tInstalling cfssl'
-        echo "=================================================================================="
-        go get -v -u github.com/cloudflare/cfssl/cmd/cfssl
-        if [[ $? -ne 0 ]] ; then
-            echo "ERROR: Failed to install cfssl!"
-            exit 1
-        fi
-        install -c $GOPATH/bin/cfssl /usr/local/bin/cfssl
-    fi
-fi
-
-
 # Prepare to build TPM libraries
 if [[ "$NEED_BUILD_TOOLS" -eq "1" ]] ; then
     echo
@@ -409,18 +290,18 @@ if [[ "$NEED_BUILD_TOOLS" -eq "1" ]] ; then
     TMPDIR=`mktemp -d` || exit 1
     echo "INFO: Using temp tpm directory: $TMPDIR"
 
+    if [[ -n "${POWERTOOLS}" ]] ; then
+        $PACKAGE_MGR -y $POWERTOOLS
+        if [[ $? > 0 ]] ; then
+            echo "ERROR: Package(s) failed to install properly!"
+            exit 1
+        fi
+    fi
+
     $PACKAGE_MGR -y install $BUILD_TOOLS
     if [[ $? > 0 ]] ; then
         echo "ERROR: Package(s) failed to install properly!"
         exit 1
-    fi
-
-    if [[ -n "${POWERTOOLS}" ]] ; then
-    	$PACKAGE_MGR -y $POWERTOOLS
-    	if [[ $? > 0 ]] ; then
-        	echo "ERROR: Package(s) failed to install properly!"
-        	exit 1
-    	fi
     fi
 
     mkdir -p $TMPDIR/tpm
@@ -520,17 +401,31 @@ if [[ "$NEED_PYTHON_DIR" -eq "1" ]] ; then
 fi
 python3 -m pip install . -r requirements.txt
 
-if [[ -f "/etc/keylime.conf" ]] ; then
-    if [[ $(diff -N "/etc/keylime.conf" "keylime.conf") ]] ; then
-        echo "Modified keylime.conf found in /etc/, creating /etc/keylime.conf.new instead"
-        cp keylime.conf /etc/keylime.conf.new
-        chmod 600 /etc/keylime.conf.new
+echo
+echo "=================================================================================="
+echo $'\t\t\t\tBuild and install configuration'
+echo "=================================================================================="
+
+mkdir -p /etc/keylime
+mkdir -p config
+pushd scripts
+python3 convert_config.py --input ../keylime.conf --out ../config
+popd
+
+for comp in "agent" "verifier" "tenant" "registrar" "ca" "logging"; do
+    mkdir -p /etc/keylime/$comp.conf.d
+    if [[ -f "/etc/keylime/$comp.conf" ]] ; then
+        if [[ $(diff -N "/etc/keylime/$comp.conf" "config/$comp.conf") ]] ; then
+            echo "Modified $comp.conf found in /etc/keylime, creating /etc/keylime/$comp.conf.new instead"
+            cp "config/$comp.conf" "/etc/keylime/$comp.conf.new"
+            chmod 600 /etc/keylime/$comp.conf.new
+        fi
+    else
+        echo "Installing $comp.conf to /etc/keylime"
+        cp -n "config/$comp.conf" "/etc/keylime/"
+        chmod 600 "/etc/keylime/$comp.conf"
     fi
-else
-    echo "Installing keylime.conf to /etc/"
-    cp -n keylime.conf /etc/
-    chmod 600 /etc/keylime.conf
-fi
+done
 
 echo
 echo "=================================================================================="
@@ -543,14 +438,6 @@ if [ ! -d "/var/lib/keylime/tpm_cert_store" ]; then
 else
   echo "Updating existing cert store"
   cp -n $KEYLIME_DIR/tpm_cert_store/* /var/lib/keylime/tpm_cert_store/
-fi
-
-if [[ "$OPENSSL" -eq "0" ]] ; then
-    echo
-    echo "=================================================================================="
-    echo $'\t\t\tSwitching config to cfssl'
-    echo "=================================================================================="
-    sed -i 's/ca_implementation = openssl/ca_implementation = cfssl/' /etc/keylime.conf
 fi
 
 # Run agent packager (tarball)
@@ -579,7 +466,7 @@ if [[ "$TPM_SOCKET" -eq "1" ]] ; then
     echo "=================================================================================="
 
     # disable ek cert checking
-    sed -i 's/require_ek_cert = True/require_ek_cert = False/' /etc/keylime.conf
+    sed -i 's/require_ek_cert = True/require_ek_cert = False/' /etc/keylime/tenant.conf
 else
     # Warn that we don't use abrmd anymore.
     echo "=================================================================================="
