@@ -48,6 +48,16 @@ class AcceptAll(Policy):
         return tests.AcceptAll()
 
 
+class RejectAll(Policy):
+    """Policy that rejects all eventlogs"""
+
+    def get_relevant_pcrs(self) -> typing.FrozenSet[int]:
+        return set()
+
+    def refstate_to_test(self, refstate: RefState) -> tests.Test:
+        return tests.RejectAll("reject all")
+
+
 def _mkreg() -> typing.Mapping[str, Policy]:
     return {}
 
@@ -61,6 +71,7 @@ def register(name: str, policy: Policy):
 
 
 register("accept-all", AcceptAll())
+register("reject-all", RejectAll())
 
 
 def get_policy_names() -> typing.Tuple[str, ...]:
@@ -77,7 +88,7 @@ def refstate_to_test(policy_name: str, refstate: RefState) -> tests.Test:
     """Compiles the given RefState into the Test prescribed by the named policy"""
     policy = get_policy(policy_name)
     if policy is None:
-        raise Exception(f'there is no policy named {policy_name!a}')
+        raise Exception(f"there is no policy named {policy_name!a}")
     return policy.refstate_to_test(refstate)
 
 
@@ -92,8 +103,9 @@ def evaluate(policy_name: str, refstate: RefState, eventlog: tests.Data) -> str:
     return tester.why_not({}, eventlog)
 
 
-imports = config.MEASUREDBOOT_IMPORTS
-#print(f'importing {imports!r}, __package__={__package__!r}')
-for imp in imports:
-    if imp:
-        importlib.import_module(imp, __package__)
+imports = config.getlist("verifier", "measured_boot_imports")
+# print(f'importing {imports!r}, __package__={__package__!r}')
+if imports:
+    for imp in imports:
+        if imp:
+            importlib.import_module(imp, __package__)

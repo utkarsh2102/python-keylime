@@ -4,7 +4,8 @@ Before=keylime_registrar.service
 Description=The Keylime verifier
 StartLimitInterval=10s
 StartLimitBurst=5
-ConditionPathExistsGlob=/etc/keylime.conf
+ConditionPathExistsGlob=/etc/keylime/verifier.conf
+ConditionPathExistsGlob=/etc/keylime/logging.conf
 
 [Service]
 Group=tss

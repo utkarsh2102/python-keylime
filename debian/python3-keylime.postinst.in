@@ -25,6 +25,24 @@ case "$1" in
         chmod 700 /var/run/keylime
     fi
 
+
+    # Setting owner and file permissions
+    CONFS=""
+    if [ "${KEYLIME_PART}" = "server" ]; then
+        CONFS="verifier.conf registrar.conf"
+    elif [ "${KEYLIME_PART}" = "agent" ]; then
+        CONFS="agent.conf"
+    elif [ "${KEYLIME_PART}" = "tenant" ]; then
+        CONFS="tenant.conf"
+    fi
+
+    for CONF in ${CONFS}; do
+        if [ -f /etc/keylime/${CONF} ] && ! dpkg-statoverride --list /etc/{$CONF} >/dev/null && getent passwd keylime >/dev/null; then
+            chown -R keylime:tss /etc/keylime/${CONF}
+            chmod 600 /etc/keylime/${CONF}
+        fi
+    done
+
     ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)

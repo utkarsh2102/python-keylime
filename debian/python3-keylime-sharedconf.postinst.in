@@ -1,0 +1,34 @@
+#!/bin/sh
+
+set -e
+KEYLIME_PART=@keylime_part@
+
+#KEYLIME_COMMON#
+
+case "$1" in
+    configure)
+    # Setup the keylime user and the tss group
+    keylime_setup_group_user
+
+
+    # Setting owner and file permissions
+    CONFS="logging.conf ca.conf"
+    for CONF in ${CONFS}; do
+        if [ -f /etc/keylime/${CONF} ] && ! dpkg-statoverride --list /etc/{$CONF} >/dev/null && getent passwd keylime >/dev/null; then
+            chown -R keylime:tss /etc/keylime/${CONF}
+            chmod 600 /etc/keylime/${CONF}
+        fi
+    done
+
+    ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+    ;;
+
+    *)
+        echo "postinst called with unknown argument \`$1'" >&2
+        exit 1
+    ;;
+esac
+
+#DEBHELPER#

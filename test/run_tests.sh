@@ -30,7 +30,7 @@ for opt in "$@"; do
   esac
 done
 
-while getopts ":cuhs:" opt; do
+while getopts ":cuh:" opt; do
     case $opt in
         c)
             COVERAGE=1
@@ -43,19 +43,11 @@ while getopts ":cuhs:" opt; do
             UMODE_OPT="--user"
             export KEYLIME_TEST=True
             ;;
-        s)
-            CA_IMP="$OPTARG"
-            case $CA_IMP in
-                (openssl|cfssl) ;; # OK
-                (*) printf >&2 "Invalid: CA Implementation \"$CA_IMP\". Options are openssl or cfssl \n"; exit 1;;
-                esac
-            ;;
         h)
             echo "Usage: $0 [option...]"
             echo "Options:"
             echo $'-c \t\t Run Coverage scans'
             echo $'-u \t\t Run in user (non-root) mode'
-            echo $'-s ssl \t\t Select CA implementation (openssl|cfssl)'
             echo $'-h \t\t This help info'
             exit
             ;;
@@ -112,24 +104,6 @@ if [[ ! -d "$KEYLIME_DIR/test" || ! -d "$KEYLIME_DIR/keylime" ]] ; then
     exit 1
 fi
 
-# Copy keyline.conf into place
-if [ ! -f "/etc/keylime.conf" ]; then
-    if [ "$USER_MODE" == "1" ]; then
-        echo -e "keylime.conf cannot be copied as a non-root user, please copy keylime.conf to etc/ and restart script"
-        exit 1
-    else
-        echo -e "Copying keylime.conf into /etc/keylime.conf"
-        cp -n $KEYLIME_DIR/keylime.conf /etc/keylime.conf
-        echo -e "Setting require_ek_cert to False"
-        sed -i 's/require_ek_cert = True/require_ek_cert = False/g' /etc/keylime.conf
-        if [ "$CA_IMP" == "cfssl" ]; then
-            echo -e "Setting CA Implementation to CFSSL"
-            sed -i 's/ca_implementation = openssl/ca_implementation = cfssl/g' /etc/keylime.conf
-            $PACKAGE_MGR install -y golang
-        fi
-    fi
-fi
-
 # Set correct dependencies
 # Fedora
 if [ $PACKAGE_MGR = "dnf" ]; then
@@ -172,8 +146,23 @@ echo "==========================================================================
 pip3 install $UMODE_OPT -r $KEYLIME_DIR/test/test-requirements.txt
 if [ "$RUST_TEST" == 1 ]
 then
-    git clone https://github.com/keylime/rust-keylime.git $KEYLIME_DIR/../rust-keylime
-    cargo build --manifest-path $KEYLIME_DIR/../rust-keylime/Cargo.toml --bin keylime_agent
+    if [[ ! -d "$KEYLIME_DIR/../rust-keylime" ]]; then
+        git clone https://github.com/keylime/rust-keylime.git $KEYLIME_DIR/../rust-keylime
+    fi
+    pushd $KEYLIME_DIR/../rust-keylime && make
+    if [ "$USER_MODE" == "1" ]; then
+        echo -e "The rust agent cannot be installed as a non-root user, please re-run as root"
+        exit 1
+    else
+        make install
+
+        echo -e "Setting run_as to empty to run as root (due to permission issues accessing CA certificate)"
+        sed -i 's/^run_as =.*$/run_as =/g' /etc/keylime-agent.conf
+
+        echo -e "Setting tpm_ownerpassword as keylime"
+        sed -i 's/^tpm_ownerpassword =.*$/tpm_ownerpassword = keylime/g' /etc/keylime-agent.conf
+    fi
+    popd
 fi
 
 # Install Keylime
@@ -183,6 +172,31 @@ echo $'\t\t\tInstalling Keylime'
 echo "=================================================================================="
 cd $KEYLIME_DIR
 python3 -m pip install . -r requirements.txt
+
+echo "=================================================================================="
+echo $'\t\t\tInstalling configuration'
+echo "=================================================================================="
+# Copy keylime.conf into place
+if [ ! -f "/etc/keylime.conf" ]; then
+    if [ "$USER_MODE" == "1" ]; then
+        echo -e "keylime.conf cannot be copied as a non-root user, please copy keylime.conf to etc/ and restart script"
+        exit 1
+    else
+        echo -e "Copying keylime.conf into /etc/keylime.conf"
+        cp -n $KEYLIME_DIR/keylime.conf /etc/keylime.conf
+        echo -e "Setting require_ek_cert to False"
+        sed -i 's/require_ek_cert = True/require_ek_cert = False/g' /etc/keylime.conf
+    fi
+fi
+
+mkdir -p /etc/keylime
+python3 $KEYLIME_DIR/scripts/convert_config.py \
+    --input $KEYLIME_DIR/keylime.conf \
+    --out /etc/keylime \
+    --templates $KEYLIME_DIR/scripts/templates
+
+echo -e "Setting require_ek_cert to False"
+sed -i 's/require_ek_cert = True/require_ek_cert = False/g' /etc/keylime/tenant.conf
 
 echo "=================================================================================="
 echo $'\t\t\tRunning Unit Tests'
