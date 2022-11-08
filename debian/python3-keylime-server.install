@@ -4,4 +4,3 @@ usr/bin/keylime_migrations_apply
 usr/bin/keylime_registrar
 usr/bin/keylime_userdata_encrypt
 usr/bin/keylime_verifier
-usr/bin/keylime_webapp
